@@ -3,7 +3,7 @@ import { API_BASE } from './config';
 
 export const AuthScreen: React.FC<{ onLogin: (userId: string, role: string) => void }> = ({ onLogin }) => {
     const [isLogin, setIsLogin] = useState(true);
-    const [role, setRole] = useState<'student' | 'admin'>('student');
+    const [role, setRole] = useState<'student' | 'teacher'>('student');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
 
@@ -92,11 +92,11 @@ export const AuthScreen: React.FC<{ onLogin: (userId: string, role: string) => v
                         Student
                     </button>
                     <button 
-                        className={role === 'admin' ? 'active' : ''} 
-                        onClick={() => setRole('admin')}
+                        className={role === 'teacher' ? 'active' : ''} 
+                        onClick={() => setRole('teacher')}
                         type="button"
                     >
-                        Teacher (Admin)
+                        Teacher
                     </button>
                 </div>
 

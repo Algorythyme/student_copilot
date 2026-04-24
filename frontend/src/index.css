@@ -415,3 +415,111 @@ input::placeholder {
   box-shadow: 0 30px 60px rgba(0,0,0,0.4);
   animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
 }
+
+/* Revision Mode */
+.revision-config,
+.revision-exam,
+.revision-result {
+  flex: 1;
+  overflow-y: auto;
+  padding: 2rem;
+  scroll-behavior: smooth;
+}
+
+.revision-config::-webkit-scrollbar,
+.revision-exam::-webkit-scrollbar,
+.revision-result::-webkit-scrollbar {
+  width: 6px;
+}
+.revision-config::-webkit-scrollbar-track,
+.revision-exam::-webkit-scrollbar-track,
+.revision-result::-webkit-scrollbar-track {
+  background: transparent;
+}
+.revision-config::-webkit-scrollbar-thumb,
+.revision-exam::-webkit-scrollbar-thumb,
+.revision-result::-webkit-scrollbar-thumb {
+  background: var(--border-light);
+  border-radius: 10px;
+}
+
+.revision-config h2,
+.revision-exam h2,
+.revision-result h2 {
+  margin-bottom: 1.5rem;
+}
+
+.questions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.question-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 1.5rem;
+}
+
+.q-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.25rem 0.6rem;
+  border-radius: 4px;
+  background: var(--accent-glow);
+  color: var(--accent-primary);
+  margin-bottom: 0.75rem;
+}
+
+.q-text {
+  font-size: 1rem;
+  line-height: 1.6;
+  margin-bottom: 1rem;
+}
+
+.options-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.option-label {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  transition: all 0.2s ease;
+}
+
+.option-label:hover {
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-primary);
+}
+
+.option-label.active {
+  border-color: var(--accent-primary);
+  background: var(--accent-glow);
+  color: var(--text-primary);
+}
+
+.option-label input[type="radio"] {
+  accent-color: var(--accent-primary);
+  width: auto;
+}
+
+.feedback-content {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 2rem;
+}
+

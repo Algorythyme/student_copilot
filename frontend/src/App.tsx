@@ -64,7 +64,7 @@ function App() {
              grade: data.class_id || '',
              learning_method: data.learning_method || ''
           });
-          if (data.role === 'admin') setView('teacher');
+          if (data.role === 'teacher') setView('teacher');
         }
       } catch (err) {
         console.error("Failed to load profile", err);
@@ -104,6 +104,10 @@ function App() {
     if (!input.trim()) return;
     // General mode requires a conversation_id; notebook mode does not
     if (mode === 'general' && !convId) return;
+    if (mode === 'notebook' && !activeSubject.trim()) {
+      alert('Please enter an Active Subject in the sidebar before asking.');
+      return;
+    }
 
     const userMsg = input.trim();
     setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
@@ -268,7 +272,7 @@ function App() {
              {mode === 'general' ? 'Student OS' : mode === 'notebook' ? 'Notebook' : 'Revision'}
           </h2>
           <div style={{ display: 'flex', gap: '0.4rem' }}>
-            {currentRole === 'admin' && (
+            {currentRole === 'teacher' && (
               <button onClick={() => setView('teacher')} className="ghost" style={{ padding: '0.4rem 0.6rem', fontSize: '0.7rem' }}>Teacher Panel</button>
             )}
             <button onClick={handleLogout} className="danger" style={{ padding: '0.4rem 0.6rem', fontSize: '0.7rem' }}>Exit</button>

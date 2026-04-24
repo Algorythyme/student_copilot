@@ -1,0 +1,4 @@
+# Secrets — never expose to AI assistants
+.env
+.env.*
+!.env.example

@@ -1,8 +1,8 @@
 # session_manager.py
 from typing import Dict, Any, Optional, List
-from langchain_redis import RedisChatMessageHistory
+from langchain_community.chat_message_histories import RedisChatMessageHistory
 from llm_setup import redis_client  # Import the pre-initialized redis_client
-from config import logger, CONVERSATION_TTL_SECONDS, LEARNING_METHOD_TTL_SECONDS
+from config import logger, CONVERSATION_TTL_SECONDS, LEARNING_METHOD_TTL_SECONDS, REDIS_URL
 import json
 import uuid
 
@@ -243,7 +243,7 @@ def get_conversation_history(user_id: str, conversation_id: str) -> Optional[Red
         persisted_data = load_conversation_data_from_db(conversation_id)
 
         try:
-            redis_history = RedisChatMessageHistory(session_id=conversation_id, redis_client=redis_client)
+            redis_history = RedisChatMessageHistory(session_id=conversation_id, url=REDIS_URL, key_prefix="chat:")
         except Exception as e:
             logger.error(f"[session] ERROR creating RedisChatMessageHistory for conv {conversation_id}: {e}")
             raise RuntimeError(f"Failed to initialize RedisChatMessageHistory for conversation {conversation_id}: {e}") from e
@@ -264,7 +264,7 @@ def get_conversation_history(user_id: str, conversation_id: str) -> Optional[Red
         if redis_history is None or not isinstance(redis_history, RedisChatMessageHistory):
             logger.warning(f"[session] Re-initializing RedisChatMessageHistory for conv: {conversation_id}")
             try:
-                redis_history = RedisChatMessageHistory(session_id=conversation_id, redis_client=redis_client)
+                redis_history = RedisChatMessageHistory(session_id=conversation_id, url=REDIS_URL, key_prefix="chat:")
                 conversation_data["chat_history_redis"] = redis_history
             except Exception as e:
                 logger.error(f"[session] ERROR re-initializing RedisChatMessageHistory for conv {conversation_id}: {e}")

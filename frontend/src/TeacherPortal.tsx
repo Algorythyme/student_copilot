@@ -24,7 +24,7 @@ export const TeacherPortal: React.FC<{ userId: string }> = ({ userId }) => {
         formData.append('subject', uploadSubject);
 
         try {
-            const headers = await authHeadersMultipart(userId, 'admin');
+            const headers = await authHeadersMultipart(userId);
             const res = await fetch(`${API_BASE}/teacher/upload`, {
                 method: 'POST',
                 headers: headers,

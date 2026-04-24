@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Import components from our modules
 import config
 from config import (
-    logger, ADMIN_IDS, JWT_SECRET, JWT_ALGORITHM, JWT_EXPIRY_HOURS,
+    logger, JWT_SECRET, JWT_ALGORITHM, JWT_EXPIRY_HOURS,
     validate_safe_string, validate_safe_name,
     RATE_LIMIT_CHAT, RATE_LIMIT_GENERATE, RATE_LIMIT_UPLOAD, RATE_LIMIT_AUTH,
     TEACHER_CONTENT_TTL_SECONDS,
@@ -191,11 +191,7 @@ async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ):
-    """
-    Dual-mode auth: accepts JWT Bearer token OR legacy X-User-ID header.
-    JWT takes priority. Falls back to X-User-ID for backwards compatibility.
-    """
-    # Try JWT first
+    """JWT-only auth: extracts user identity from a signed Bearer token."""
     if credentials and credentials.credentials:
         payload = decode_jwt(credentials.credentials)
         user_id = payload.get("sub")
@@ -206,18 +202,7 @@ async def get_current_user(
         request.state.user_role = payload.get("role", "student")
         return user_id
 
-    # Fallback to legacy X-User-ID header
-    if config.ALLOW_LEGACY_AUTH:
-        legacy_id = request.headers.get("X-User-ID")
-    else:
-        legacy_id = None
-    if legacy_id:
-        legacy_id = validate_safe_string(legacy_id, "user_id")
-        logger.warning(f"[auth] Legacy X-User-ID header used by {legacy_id}. Migrate to JWT.")
-        request.state.user_role = "admin" if legacy_id in ADMIN_IDS else "student"
-        return legacy_id
-
-    raise HTTPException(status_code=401, detail="Authentication required. Send JWT Bearer token or X-User-ID header.")
+    raise HTTPException(status_code=401, detail="Authentication required. Send a valid JWT Bearer token.")
 
 
 @app.get("/health")
@@ -236,12 +221,11 @@ async def require_admin(
     request: Request,
     user_id: str = Depends(get_current_user)
 ):
-    """Ensures the current user is an admin (JWT role, static allow-list, or Redis admin set)."""
+    """Ensures the current user has teacher/admin privileges (JWT role or Redis dynamic set)."""
     is_admin = False
     try:
-        if getattr(request.state, "user_role", None) == "admin":
-            is_admin = True
-        elif user_id in ADMIN_IDS:
+        role = getattr(request.state, "user_role", None)
+        if role in ("admin", "teacher"):
             is_admin = True
         else:
             from llm_setup import redis_client as r
@@ -252,7 +236,7 @@ async def require_admin(
 
     if not is_admin:
         logger.warning(f"[auth] Non-admin user {user_id} attempted teacher action.")
-        raise HTTPException(status_code=403, detail="Forbidden: Admin privileges required.")
+        raise HTTPException(status_code=403, detail="Forbidden: Teacher privileges required.")
     return user_id
 
 
@@ -293,8 +277,8 @@ class UserRegistration(BaseModel):
     @classmethod
     def sanitize_role(cls, v):
         role = validate_safe_string(v, "role").lower()
-        if role not in {"student", "admin"}:
-            raise ValueError("role must be 'student' or 'admin'")
+        if role not in {"student", "teacher"}:
+            raise ValueError("role must be 'student' or 'teacher'")
         return role
 
 class TokenRequest(BaseModel):
@@ -319,8 +303,7 @@ async def register_user(request: Request, req: UserRegistration):
     if existing_user.data:
         raise HTTPException(status_code=400, detail="Username already exists.")
 
-    if req.role == "admin" and req.username not in ADMIN_IDS:
-        raise HTTPException(status_code=403, detail="Admin registration is restricted.")
+
 
     salt = secrets.token_hex(16)
     hashed_pw = hashlib.pbkdf2_hmac('sha256', req.password.encode(), salt.encode(), PBKDF2_ITERATIONS).hex()
@@ -348,7 +331,7 @@ async def register_user(request: Request, req: UserRegistration):
     r.hset(f"user:{req.username}:profile", mapping={k: str(v) if v is not None else "" for k, v in profile_data.items()})
     
     # If registering as teacher, add to dynamic admin set
-    if req.role == "admin":
+    if req.role == "teacher":
         r.sadd("system:admins", req.username)
 
     logger.info(f"[auth] Registered new {req.role}: {req.username}")
@@ -697,12 +680,13 @@ def _ingest_to_pinecone(
     parent_chunk_size: int = 2000,
     redis_ttl: Optional[int] = None,
 ) -> int:
-    """Shared ingestion: extract text → parent/child chunk → store parents in Redis → vectorize children in Pinecone.
+    """Shared ingestion: extract text → parent/child chunk → store parents in Redis+Supabase → vectorize children in Pinecone.
     Returns the total number of child chunks ingested."""
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_pinecone import PineconeVectorStore
     from llm_setup import redis_client as r, embeddings as _emb
     from config import PINECONE_INDEX_NAME
+    from database import get_supabase
 
     if suffix == ".pdf":
         import pymupdf4llm
@@ -723,9 +707,23 @@ def _ingest_to_pinecone(
 
     for p_chunk in parent_chunks:
         parent_id = f"parent_{uuid.uuid4().hex}"
+        # Write-through: Redis (hot cache) + Supabase (permanent)
         r.hset(parent_id, "content", p_chunk)
         if redis_ttl and redis_ttl > 0:
             r.expire(parent_id, redis_ttl)
+
+        supabase = get_supabase()
+        if supabase:
+            try:
+                supabase.table('parent_chunks').upsert({
+                    "id": parent_id,
+                    "content": p_chunk,
+                    "owner_id": metadata_base.get("owner_id", ""),
+                    "source": filename,
+                    "role": metadata_base.get("role", "student"),
+                }).execute()
+            except Exception as e:
+                logger.error(f"[ingest] Supabase parent chunk write failed for {parent_id}: {e}")
 
         children = child_splitter.split_text(p_chunk)
         all_child_chunks.extend(children)
@@ -839,6 +837,19 @@ async def notebook_ask(
             p_content = r.hget(pid, "content")
             if p_content:
                 parent_texts.append(p_content.decode(errors="ignore"))
+            else:
+                # Cache miss — read-through from Supabase and repopulate Redis
+                from database import get_supabase
+                supabase = get_supabase()
+                if supabase:
+                    try:
+                        res = supabase.table('parent_chunks').select('content').eq('id', pid).execute()
+                        if res.data:
+                            content = res.data[0]["content"]
+                            parent_texts.append(content)
+                            r.hset(pid, "content", content)
+                    except Exception:
+                        pass
                 
         if parent_texts:
             context = "\n\n---\n\n".join(parent_texts)
@@ -1011,6 +1022,18 @@ async def generate_exam(
             p_content = r.hget(pid, "content")
             if p_content:
                 parent_texts.append(p_content.decode(errors="ignore"))
+            else:
+                from database import get_supabase
+                supabase = get_supabase()
+                if supabase:
+                    try:
+                        res = supabase.table('parent_chunks').select('content').eq('id', pid).execute()
+                        if res.data:
+                            content = res.data[0]["content"]
+                            parent_texts.append(content)
+                            r.hset(pid, "content", content)
+                    except Exception:
+                        pass
                 
         if parent_texts:
             context = "\n\n---\n\n".join(parent_texts)
@@ -1076,6 +1099,18 @@ async def evaluate_exam(
             p_content = r.hget(pid, "content")
             if p_content:
                 parent_texts.append(p_content.decode(errors="ignore"))
+            else:
+                from database import get_supabase
+                supabase = get_supabase()
+                if supabase:
+                    try:
+                        res = supabase.table('parent_chunks').select('content').eq('id', pid).execute()
+                        if res.data:
+                            content = res.data[0]["content"]
+                            parent_texts.append(content)
+                            r.hset(pid, "content", content)
+                    except Exception:
+                        pass
                 
         if parent_texts:
             context = "\n\n---\n\n".join(parent_texts)

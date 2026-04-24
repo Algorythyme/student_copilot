@@ -62,7 +62,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 # ─── AUTH & SECURITY ─────────────────────────────────────────────────────────
 JWT_SECRET_ENV = os.getenv("JWT_SECRET")
-ALLOW_LEGACY_AUTH = os.getenv("ALLOW_LEGACY_AUTH", "false").lower() == "true"
 ENFORCE_STRONG_JWT_SECRET = os.getenv("ENFORCE_STRONG_JWT_SECRET", "true").lower() == "true"
 DEFAULT_JWT_SECRET_MARKERS = {
     "change_me_in_production",
@@ -93,8 +92,7 @@ JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", "24"))
 CORS_ALLOW_ORIGINS_RAW = os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 CORS_ALLOW_ORIGINS = [o.strip() for o in CORS_ALLOW_ORIGINS_RAW.split(",") if o.strip()]
 
-# Admin user IDs (comma-separated in .env for multi-admin support)
-ADMIN_IDS = set(filter(None, os.getenv("ADMIN_IDS", "sovereign_admin_1").split(",")))
+
 
 # ΓöÇΓöÇΓöÇ OPERATIONAL LIMITS ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 # Redis TTL for conversation data (seconds). Default: 30 days.
@@ -185,4 +183,4 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 if not JWT_SECRET_ENV and not ENFORCE_STRONG_JWT_SECRET:
     logger.warning("WARNING: Using dynamically generated random JWT_SECRET. Set JWT_SECRET in .env for production.")
 
-logger.info(f"[startup] Config loaded. LLM={LLM_PROVIDER}, Admins={ADMIN_IDS}, ConvTTL={CONVERSATION_TTL_SECONDS}s")
+logger.info(f"[startup] Config loaded. LLM={LLM_PROVIDER}, ConvTTL={CONVERSATION_TTL_SECONDS}s")

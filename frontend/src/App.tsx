@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { TeacherPortal } from './TeacherPortal';
 import { RevisionMode } from './RevisionMode';
 import { AuthScreen } from './AuthScreen';
@@ -23,6 +23,32 @@ interface Message {
   content: string;
 }
 
+interface ConversationEntry {
+  id: string;
+  title: string;
+  updated_at?: string;
+}
+
+/** Returns a human-friendly relative timestamp like "2h ago" or "Mar 12". */
+function formatRelativeTime(iso: string | undefined): string {
+  if (!iso) return '';
+  try {
+    const date = new Date(iso);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMin = Math.floor(diffMs / 60_000);
+    if (diffMin < 1) return 'Just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    const diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 7) return `${diffDay}d ago`;
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  } catch {
+    return '';
+  }
+}
+
 function App() {
   // Auth
   const [currentUser, setCurrentUser] = useState<string | null>(localStorage.getItem('current_user'));
@@ -44,6 +70,12 @@ function App() {
   const [uploading, setUploading] = useState(false);
   const [activeSubject, setActiveSubject] = useState('');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  // Chat history sidebar
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [conversations, setConversations] = useState<ConversationEntry[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [resumingConvId, setResumingConvId] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const prevConvRef = useRef<string | null>(null);
@@ -84,6 +116,29 @@ function App() {
       }
     })();
   }, [currentUser]);
+
+  // Fetch conversation list
+  const fetchConversations = useCallback(async () => {
+    if (!currentUser || currentRole === 'teacher') return;
+    try {
+      const headers = await authHeaders(currentUser);
+      const res = await fetch(`${API_BASE}/conversations`, { headers });
+      checkAuthExpiry(res);
+      if (res.ok) {
+        const data = await res.json();
+        setConversations(data.conversations || []);
+      }
+    } catch (err) {
+      console.error('Failed to load conversations', err);
+    }
+  }, [currentUser, currentRole]);
+
+  // Load conversations on login and when sidebar opens
+  useEffect(() => {
+    if (sidebarOpen && currentUser && currentRole !== 'teacher') {
+      fetchConversations();
+    }
+  }, [sidebarOpen, currentUser, currentRole, fetchConversations]);
 
   // Init conversation for chat mode
   useEffect(() => {
@@ -148,7 +203,51 @@ function App() {
     setMessages([]);
     setConvId(null);
     setActiveSubject('');
+    setSidebarOpen(false);
     // New conversation will be created by useEffect
+  };
+
+  // Resume a prior conversation
+  const handleResumeConversation = async (targetConvId: string) => {
+    if (!currentUser || targetConvId === convId) {
+      setSidebarOpen(false);
+      return;
+    }
+
+    // Sync current conversation silently before switching
+    if (convId) {
+      syncLearningProfile(convId);
+    }
+
+    setResumingConvId(targetConvId);
+    setLoadingHistory(true);
+
+    try {
+      const headers = await authHeaders(currentUser);
+      const res = await fetch(`${API_BASE}/conversations/${targetConvId}/messages`, { headers });
+      checkAuthExpiry(res);
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      const loadedMessages: Message[] = (data.messages || []).map((m: any) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      }));
+
+      setMessages(loadedMessages);
+      setConvId(targetConvId);
+      setActiveSubject('');
+      setSidebarOpen(false);
+    } catch (err: any) {
+      setToast({ message: `Failed to load chat: ${err.message}`, type: 'error' });
+    } finally {
+      setLoadingHistory(false);
+      setResumingConvId(null);
+    }
   };
 
   const handleSend = async (e?: React.FormEvent) => {
@@ -240,6 +339,8 @@ function App() {
     setConvId(null);
     setMessages([]);
     setProfile({ name: '', age: '', country: '', grade: '' });
+    setConversations([]);
+    setSidebarOpen(false);
   };
 
   // ─── Auth Gate ───────────────────────────────────────────
@@ -276,6 +377,14 @@ function App() {
   return (
     <>
       <nav className="top-nav">
+        <button
+          className="sidebar-toggle"
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          title={sidebarOpen ? 'Close chat history' : 'Open chat history'}
+          aria-label="Toggle chat history"
+        >
+          <span className="sidebar-toggle-icon">{sidebarOpen ? '✕' : '☰'}</span>
+        </button>
         <span className="nav-brand">Student Copilot</span>
         <div className="nav-tabs">
           <button className={`nav-tab ${tab === 'chat' ? 'active' : ''}`} onClick={() => setTab('chat')}>Chat</button>
@@ -292,73 +401,107 @@ function App() {
         </div>
       </nav>
 
-      <div className="content-area">
-        {tab === 'revision' ? (
-          <RevisionMode userId={currentUser} />
-        ) : (
-          <>
-            {/* Chat toolbar — subject selector */}
-            <div className="chat-toolbar">
-              <input
-                className="subject-select"
-                type="text"
-                placeholder="Subject (optional)"
-                value={activeSubject}
-                onChange={e => setActiveSubject(e.target.value)}
-              />
-              <span className="chat-mode-label">
-                {isNotebookMode
-                  ? `Studying ${activeSubject} from your materials`
-                  : 'General tutor — ask anything'}
-              </span>
-            </div>
-
-            {/* Messages */}
-            <div className="chat-messages">
-              {messages.length === 0 && (
-                <div className="chat-empty">
-                  <h3>{profile.name ? `Hi ${profile.name.split(' ')[0]}!` : 'Welcome!'}</h3>
-                  <p>
-                    {isNotebookMode
-                      ? `Ask me anything about ${activeSubject}. I'll answer from your study materials.`
-                      : 'What would you like to study today? Type a subject above to study from your materials, or just ask me anything.'}
-                  </p>
-                </div>
-              )}
-              {messages.map((m, i) => (
-                <div key={i} className={`message ${m.role}`}>
-                  {m.role === 'user' ? m.content : (
-                    <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
-                      {m.content}
-                    </ReactMarkdown>
-                  )}
-                </div>
-              ))}
-              {loading && (
-                <div className="message assistant" style={{ opacity: 0.6 }}>Thinking...</div>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-
-            {/* Input bar */}
-            <form className="chat-input-bar" onSubmit={handleSend}>
-              <div className="btn-upload-icon" title={uploading ? 'Uploading...' : 'Upload file'}>
-                {uploading ? '⏳' : '📎'}
-                <input type="file" onChange={handleUpload} disabled={uploading || (!isNotebookMode && !convId)} />
+      <div className="app-body">
+        {/* ─── Chat History Sidebar ─── */}
+        <aside className={`history-sidebar ${sidebarOpen ? 'open' : ''}`}>
+          <div className="sidebar-header">
+            <h3>Chat History</h3>
+            <button className="btn-ghost sidebar-new-btn" onClick={handleNewChat}>+ New</button>
+          </div>
+          <div className="sidebar-list">
+            {conversations.length === 0 ? (
+              <div className="sidebar-empty">
+                <p>No previous chats yet.</p>
+                <p className="sidebar-empty-sub">Start a conversation and it will appear here.</p>
               </div>
-              <input
-                type="text"
-                placeholder="Ask me anything..."
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                disabled={loading || (!isNotebookMode && !convId)}
-              />
-              <button type="submit" className="btn-send" disabled={loading || !input.trim() || (!isNotebookMode && !convId)}>
-                Send
-              </button>
-            </form>
-          </>
-        )}
+            ) : (
+              conversations.map(c => (
+                <button
+                  key={c.id}
+                  className={`sidebar-item ${c.id === convId ? 'active' : ''} ${resumingConvId === c.id ? 'loading' : ''}`}
+                  onClick={() => handleResumeConversation(c.id)}
+                  disabled={loadingHistory}
+                  title={c.title}
+                >
+                  <span className="sidebar-item-title">{c.title || 'Untitled Chat'}</span>
+                  <span className="sidebar-item-time">{formatRelativeTime(c.updated_at)}</span>
+                </button>
+              ))
+            )}
+          </div>
+        </aside>
+
+        {/* Backdrop for mobile */}
+        {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
+
+        <div className="content-area">
+          {tab === 'revision' ? (
+            <RevisionMode userId={currentUser} />
+          ) : (
+            <>
+              {/* Chat toolbar — subject selector */}
+              <div className="chat-toolbar">
+                <input
+                  className="subject-select"
+                  type="text"
+                  placeholder="Subject (optional)"
+                  value={activeSubject}
+                  onChange={e => setActiveSubject(e.target.value)}
+                />
+                <span className="chat-mode-label">
+                  {isNotebookMode
+                    ? `Studying ${activeSubject} from your materials`
+                    : 'General tutor — ask anything'}
+                </span>
+              </div>
+
+              {/* Messages */}
+              <div className="chat-messages">
+                {messages.length === 0 && (
+                  <div className="chat-empty">
+                    <h3>{profile.name ? `Hi ${profile.name.split(' ')[0]}!` : 'Welcome!'}</h3>
+                    <p>
+                      {isNotebookMode
+                        ? `Ask me anything about ${activeSubject}. I'll answer from your study materials.`
+                        : 'What would you like to study today? Type a subject above to study from your materials, or just ask me anything.'}
+                    </p>
+                  </div>
+                )}
+                {messages.map((m, i) => (
+                  <div key={i} className={`message ${m.role}`}>
+                    {m.role === 'user' ? m.content : (
+                      <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
+                        {m.content}
+                      </ReactMarkdown>
+                    )}
+                  </div>
+                ))}
+                {loading && (
+                  <div className="message assistant" style={{ opacity: 0.6 }}>Thinking...</div>
+                )}
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* Input bar */}
+              <form className="chat-input-bar" onSubmit={handleSend}>
+                <div className="btn-upload-icon" title={uploading ? 'Uploading...' : 'Upload file'}>
+                  {uploading ? '⏳' : '📎'}
+                  <input type="file" onChange={handleUpload} disabled={uploading || (!isNotebookMode && !convId)} />
+                </div>
+                <input
+                  type="text"
+                  placeholder="Ask me anything..."
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  disabled={loading || (!isNotebookMode && !convId)}
+                />
+                <button type="submit" className="btn-send" disabled={loading || !input.trim() || (!isNotebookMode && !convId)}>
+                  Send
+                </button>
+              </form>
+            </>
+          )}
+        </div>
       </div>
 
       {settingsOpen && <SettingsModal profile={profile} onClose={() => setSettingsOpen(false)} />}

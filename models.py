@@ -1,4 +1,4 @@
-﻿# models.py
+# models.py
 from pydantic import BaseModel, field_validator
 from typing import Optional, Dict, Any, List
 
@@ -31,6 +31,7 @@ class ChatRequest(BaseModel):
 class ConversationItem(BaseModel):
     id: str
     title: str
+    updated_at: Optional[str] = None
 
 
 # For the /conversations/new endpoint request body

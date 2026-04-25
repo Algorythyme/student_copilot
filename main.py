@@ -471,6 +471,34 @@ async def list_user_conversations(user_id: str = Depends(get_current_user)):
     return {"conversations": conversations_data}
 
 
+@app.get("/conversations/{conversation_id}/messages", tags=["Conversation Management"])
+async def get_conversation_messages(
+    conversation_id: str,
+    user_id: str = Depends(get_current_user)
+):
+    """Retrieves the full message history for a conversation owned by the current user."""
+    conversation_id = validate_safe_string(conversation_id, "conversation_id")
+    logger.info(f"[main] User {user_id} loading messages for conv: {conversation_id}")
+
+    try:
+        conv_history_obj = get_conversation_history(user_id, conversation_id)
+        if conv_history_obj is None:
+            raise HTTPException(status_code=404, detail="Conversation not found or access denied.")
+
+        raw_messages = conv_history_obj.messages
+        serialized = []
+        for msg in raw_messages:
+            role = "assistant" if msg.type == "ai" else "user"
+            serialized.append({"role": role, "content": msg.content})
+
+        return {"messages": serialized, "conversation_id": conversation_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[main] Error loading messages for {conversation_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load conversation messages.")
+
+
 @app.post("/conversations/{conversation_id}/end", tags=["Conversation Management"])
 async def end_conversation(conversation_id: str, user_id: str = Depends(get_current_user)):
     """Evaluate session and update the user's permanent learning strategy."""

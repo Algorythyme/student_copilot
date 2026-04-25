@@ -174,16 +174,23 @@ def create_new_conversation_id(user_id: str, initial_title: str = "Untitled Chat
         raise RuntimeError(f"Failed to create new conversation: {e}")
 
 def get_user_conversation_ids(user_id: str) -> List[Dict[str, str]]:
-    """Retrieves all conversation IDs and titles for a given user from Supabase."""
+    """Retrieves all conversation IDs, titles, and timestamps for a given user from Supabase."""
     from database import get_supabase
     supabase = get_supabase()
     if not supabase:
         return []
 
     try:
-        res = supabase.table('conversations').select('id, title').eq('user_id', user_id).order('created_at', desc=True).execute()
+        res = supabase.table('conversations').select('id, title, updated_at').eq('user_id', user_id).order('updated_at', desc=True).execute()
         if res.data:
-            return [{"id": row["id"], "title": row.get("title", "Untitled Chat")} for row in res.data]
+            return [
+                {
+                    "id": row["id"],
+                    "title": row.get("title", "Untitled Chat"),
+                    "updated_at": row.get("updated_at", "")
+                }
+                for row in res.data
+            ]
         return []
     except Exception as e:
         logger.error(f"[session_manager] Error retrieving DB conversations for {user_id}: {e}")

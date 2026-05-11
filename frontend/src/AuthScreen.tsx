@@ -7,7 +7,6 @@ interface AuthProps {
 
 export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
   const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [role, setRole] = useState<'student' | 'teacher'>('student');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -45,7 +44,7 @@ export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            username, password, role,
+            username, password, role: 'student',
             full_name: fullName,
             age: age ? parseInt(age) : null,
             country, class_id: classId, subjects
@@ -83,16 +82,7 @@ export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
           </button>
         </div>
 
-        {mode === 'register' && (
-          <div className="role-toggle">
-            <button className={`role-btn ${role === 'student' ? 'active' : ''}`} onClick={() => setRole('student')} type="button">
-              Student
-            </button>
-            <button className={`role-btn ${role === 'teacher' ? 'active' : ''}`} onClick={() => setRole('teacher')} type="button">
-              Teacher
-            </button>
-          </div>
-        )}
+
 
         <form onSubmit={handleSubmit}>
           <div className="field">
@@ -120,18 +110,14 @@ export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
                   <input type="text" value={country} onChange={e => setCountry(e.target.value)} placeholder="Nigeria" />
                 </div>
               </div>
-              {role === 'student' && (
-                <>
-                  <div className="field">
-                    <label>Class ID</label>
-                    <input type="text" value={classId} onChange={e => setClassId(e.target.value)} placeholder="e.g. SSS 1" />
-                  </div>
-                  <div className="field">
-                    <label>Subjects <span className="optional">(comma separated)</span></label>
-                    <input type="text" value={subjects} onChange={e => setSubjects(e.target.value)} placeholder="Biology, Math, Physics" />
-                  </div>
-                </>
-              )}
+              <div className="field">
+                <label>Class ID</label>
+                <input type="text" value={classId} onChange={e => setClassId(e.target.value)} placeholder="e.g. SSS 1" />
+              </div>
+              <div className="field">
+                <label>Subjects <span className="optional">(comma separated)</span></label>
+                <input type="text" value={subjects} onChange={e => setSubjects(e.target.value)} placeholder="Biology, Math, Physics" />
+              </div>
             </>
           )}
 

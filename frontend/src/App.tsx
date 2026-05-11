@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { TeacherPortal } from './TeacherPortal';
 import { RevisionMode } from './RevisionMode';
 import { AuthScreen } from './AuthScreen';
 import { API_BASE, authHeaders, authHeadersMultipart, checkAuthExpiry } from './config';
@@ -56,7 +55,6 @@ function App() {
 
   // Navigation
   const [tab, setTab] = useState<'chat' | 'revision'>('chat');
-  const [teacherTab, setTeacherTab] = useState<'upload' | 'materials'>('upload');
 
   // Profile (hidden from default view)
   const [profile, setProfile] = useState<Profile>({ name: '', age: '', country: '', grade: '' });
@@ -119,7 +117,7 @@ function App() {
 
   // Fetch conversation list
   const fetchConversations = useCallback(async () => {
-    if (!currentUser || currentRole === 'teacher') return;
+    if (!currentUser) return;
     try {
       const headers = await authHeaders(currentUser);
       const res = await fetch(`${API_BASE}/conversations`, { headers });
@@ -135,14 +133,14 @@ function App() {
 
   // Load conversations on login and when sidebar opens
   useEffect(() => {
-    if (sidebarOpen && currentUser && currentRole !== 'teacher') {
+    if (sidebarOpen && currentUser) {
       fetchConversations();
     }
   }, [sidebarOpen, currentUser, currentRole, fetchConversations]);
 
   // Init conversation for chat mode
   useEffect(() => {
-    if (!currentUser || currentRole === 'teacher') return;
+    if (!currentUser) return;
     if (tab !== 'chat' || activeSubject) return; // Only for general chat (no subject = general mode)
     if (convId) return;
     (async () => {
@@ -348,28 +346,6 @@ function App() {
     return <AuthScreen onLogin={(u, r) => { setCurrentUser(u); setCurrentRole(r); }} />;
   }
 
-  // ─── Teacher Layout ──────────────────────────────────────
-  if (currentRole === 'teacher') {
-    return (
-      <>
-        <nav className="top-nav">
-          <span className="nav-brand">Student Copilot</span>
-          <div className="nav-tabs">
-            <button className={`nav-tab ${teacherTab === 'upload' ? 'active' : ''}`} onClick={() => setTeacherTab('upload')}>Upload</button>
-            <button className={`nav-tab ${teacherTab === 'materials' ? 'active' : ''}`} onClick={() => setTeacherTab('materials')}>Materials</button>
-          </div>
-          <div className="nav-actions">
-            <button className="nav-icon-btn" onClick={() => setSettingsOpen(true)} title="Settings">⚙</button>
-            <button className="btn-danger" onClick={handleLogout}>Logout</button>
-          </div>
-        </nav>
-        <div className="content-area">
-          <TeacherPortal userId={currentUser} activeTab={teacherTab} />
-        </div>
-        {settingsOpen && <SettingsModal profile={profile} onClose={() => setSettingsOpen(false)} />}
-      </>
-    );
-  }
 
   // ─── Student Layout ──────────────────────────────────────
   const isNotebookMode = !!activeSubject.trim();

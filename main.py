@@ -136,7 +136,6 @@ app.openapi_tags = [
     {"name": "Conversation Management", "description": "User and conversation lifecycle."},
     {"name": "AI Tutor Core", "description": "Chat and file upload endpoints."},
     {"name": "Notebook Oracle", "description": "Ground-truth retrieval from vectorized documents."},
-    {"name": "Teacher Administrative", "description": "Admin-only knowledge curation."},
     {"name": "Revision Mode", "description": "Socratic assessment engine."},
 ]
 
@@ -235,28 +234,6 @@ async def health_check() -> Dict[str, str]:
         raise HTTPException(status_code=503, detail="Health check failed")
 
 
-async def require_admin(
-    request: Request,
-    user_id: str = Depends(get_current_user)
-):
-    """Ensures the current user has teacher/admin privileges (JWT role or Redis dynamic set)."""
-    is_admin = False
-    try:
-        role = getattr(request.state, "user_role", None)
-        if role in ("admin", "teacher"):
-            is_admin = True
-        else:
-            from llm_setup import redis_client as r
-            if r:
-                is_admin = r.sismember("system:admins", user_id)
-    except Exception as e:
-        logger.error(f"[auth] Redis check failed for admin status: {e}")
-
-    if not is_admin:
-        logger.warning(f"[auth] Non-admin user {user_id} attempted teacher action.")
-        raise HTTPException(status_code=403, detail="Forbidden: Teacher privileges required.")
-    return user_id
-
 
 # ΓöÇΓöÇΓöÇ USER PROFILE & AUTH ENDPOINTS ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
@@ -295,8 +272,8 @@ class UserRegistration(BaseModel):
     @classmethod
     def sanitize_role(cls, v):
         role = validate_safe_string(v, "role").lower()
-        if role not in {"student", "teacher"}:
-            raise ValueError("role must be 'student' or 'teacher'")
+        if role != "student":
+            raise ValueError("role must be 'student'")
         return role
 
 class TokenRequest(BaseModel):
@@ -348,9 +325,7 @@ async def register_user(request: Request, req: UserRegistration):
     # Save a cached version as strings for fast fallback
     r.hset(f"user:{req.username}:profile", mapping={k: str(v) if v is not None else "" for k, v in profile_data.items()})
     
-    # If registering as teacher, add to dynamic admin set
-    if req.role == "teacher":
-        r.sadd("system:admins", req.username)
+
 
     logger.info(f"[auth] Registered new {req.role}: {req.username}")
     
@@ -924,62 +899,6 @@ async def notebook_ask(
     except Exception as e:
         logger.error(f"[notebook] Ask failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# =============================================================================
-# TEACHER ADMINISTRATIVE MODULE (Admin-gated)
-# =============================================================================
-
-@app.post("/teacher/upload", tags=["Teacher Administrative"])
-@limiter.limit(RATE_LIMIT_UPLOAD)
-async def teacher_upload(
-    request: Request,
-    file: UploadFile = File(...),
-    class_id: str = Form(...),
-    subject: str = Form(...),
-    user_id: str = Depends(require_admin)
-):
-    # Sanitize inputs
-    class_id = validate_safe_string(class_id, "class_id")
-    subject = validate_safe_string(subject, "subject")
-
-    logger.info(f"[teacher] Admin {user_id} uploading global context for {class_id} / {subject}")
-    from config import PINECONE_API_KEY, PINECONE_INDEX_NAME
-    from llm_setup import embeddings
-
-    if not PINECONE_API_KEY or not embeddings:
-        raise HTTPException(status_code=500, detail="Pinecone not configured.")
-
-    suffix = os.path.splitext(file.filename)[1].lower() if file.filename else ".dat"
-
-    if suffix not in SUPPORTED_UPLOAD_SUFFIXES:
-        raise HTTPException(status_code=415, detail=f"Unsupported file type '{suffix}'. Supported: {SUPPORTED_UPLOAD_SUFFIXES}")
-
-    try:
-        tmp_path = await _stream_to_tempfile_bounded(file, suffix)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read upload: {e}")
-
-    try:
-        teacher_ttl = TEACHER_CONTENT_TTL_SECONDS if TEACHER_CONTENT_TTL_SECONDS > 0 else None
-        chunk_count = _ingest_to_pinecone(
-            tmp_path=tmp_path,
-            suffix=suffix,
-            filename=file.filename,
-            metadata_base={"role": "teacher", "class_id": class_id, "subject": subject},
-            parent_chunk_size=2500,
-            redis_ttl=teacher_ttl,
-        )
-        return {"status": "Global context ingested", "class": class_id, "subject": subject, "chunks": chunk_count}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[teacher] Upload failed: {e}")
-        raise HTTPException(status_code=500, detail="Teacher upload processing failed.")
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-
 
 
 

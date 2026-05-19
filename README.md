@@ -1,4 +1,4 @@
-# ≡ƒ¢í∩╕Å student_copilot ΓÇö The Sovereign AI Tutor
+Student_copilot - The Sovereign AI Tutor
 
 **"Engineering is applied philosophy."**
 

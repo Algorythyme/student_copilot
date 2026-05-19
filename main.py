@@ -692,6 +692,69 @@ class NotebookQuestionRequest(BaseModel):
 
 SUPPORTED_UPLOAD_SUFFIXES = {".pdf", ".txt", ".md"}
 
+# Stay under Gemini free-tier embed_content limits (~100 req/min per project).
+_EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "15"))
+_EMBED_BATCH_PAUSE_SEC = float(os.getenv("EMBED_BATCH_PAUSE_SEC", "2"))
+_EMBED_MAX_RETRIES = int(os.getenv("EMBED_MAX_RETRIES", "4"))
+
+
+def _is_embedding_quota_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "429" in msg
+        or "resource_exhausted" in msg
+        or "quota" in msg
+        or "rate limit" in msg
+    )
+
+
+def _vectorize_to_pinecone(
+    texts: List[str],
+    metadatas: List[dict],
+    embedding,
+    index_name: str,
+) -> None:
+    """Embed child chunks in small batches with backoff on provider rate limits."""
+    from langchain_pinecone import PineconeVectorStore
+
+    if not texts:
+        return
+
+    for batch_idx, start in enumerate(range(0, len(texts), _EMBED_BATCH_SIZE)):
+        batch_texts = texts[start : start + _EMBED_BATCH_SIZE]
+        batch_meta = metadatas[start : start + _EMBED_BATCH_SIZE]
+        first_batch = batch_idx == 0
+
+        for attempt in range(_EMBED_MAX_RETRIES):
+            try:
+                if first_batch:
+                    PineconeVectorStore.from_texts(
+                        batch_texts,
+                        embedding=embedding,
+                        index_name=index_name,
+                        metadatas=batch_meta,
+                    )
+                else:
+                    store = PineconeVectorStore.from_existing_index(
+                        index_name=index_name,
+                        embedding=embedding,
+                    )
+                    store.add_texts(batch_texts, metadatas=batch_meta)
+                break
+            except Exception as e:
+                if _is_embedding_quota_error(e) and attempt < _EMBED_MAX_RETRIES - 1:
+                    wait = min(60, 22 * (attempt + 1))
+                    logger.warning(
+                        f"[ingest] Embedding rate limited; retrying batch {batch_idx + 1} "
+                        f"in {wait}s (attempt {attempt + 1}/{_EMBED_MAX_RETRIES})"
+                    )
+                    time.sleep(wait)
+                    continue
+                raise
+
+        if start + _EMBED_BATCH_SIZE < len(texts) and _EMBED_BATCH_PAUSE_SEC > 0:
+            time.sleep(_EMBED_BATCH_PAUSE_SEC)
+
 
 def _ingest_to_pinecone(
     tmp_path: str,
@@ -704,7 +767,6 @@ def _ingest_to_pinecone(
     """Shared ingestion: extract text → parent/child chunk → store parents in Redis+Supabase → vectorize children in Pinecone.
     Returns the total number of child chunks ingested."""
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_pinecone import PineconeVectorStore
     from llm_setup import redis_client as r, embeddings as _emb
     from config import PINECONE_INDEX_NAME
     from database import get_supabase
@@ -754,9 +816,11 @@ def _ingest_to_pinecone(
             "parent_id": parent_id,
         } for _ in children])
 
-    PineconeVectorStore.from_texts(
-        all_child_chunks, embedding=_emb,
-        index_name=PINECONE_INDEX_NAME, metadatas=metadatas
+    _vectorize_to_pinecone(
+        all_child_chunks,
+        metadatas,
+        _emb,
+        PINECONE_INDEX_NAME,
     )
     return len(all_child_chunks)
 
@@ -806,6 +870,14 @@ async def notebook_upload(
         raise
     except Exception as e:
         logger.error(f"[notebook] Upload failed: {e}")
+        if _is_embedding_quota_error(e):
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Gemini embedding quota exceeded (free tier ~100 requests/minute). "
+                    "Wait about a minute and try again with a smaller file, or upgrade your Google AI API plan."
+                ),
+            )
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(tmp_path):
@@ -907,6 +979,40 @@ async def notebook_ask(
 # REVISION & ASSESSMENT MODULE
 # =============================================================================
 
+def _revision_context_filter(
+    user_id: str,
+    subject: str,
+    class_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Match teacher class materials and this user's notebook uploads (same subject/class)."""
+    branches: List[Dict[str, Any]] = []
+
+    student_clauses: List[Dict[str, Any]] = [
+        {"owner_id": {"$eq": user_id}},
+        {"role": {"$eq": "student"}},
+        {"subject": {"$eq": subject}},
+    ]
+    if class_id:
+        student_clauses.append({
+            "$or": [
+                {"class_id": {"$eq": class_id}},
+                {"class_id": {"$eq": "General"}},
+            ]
+        })
+    branches.append({"$and": student_clauses})
+
+    if class_id:
+        branches.append({
+            "$and": [
+                {"role": {"$eq": "teacher"}},
+                {"class_id": {"$eq": class_id}},
+                {"subject": {"$eq": subject}},
+            ]
+        })
+
+    return branches[0] if len(branches) == 1 else {"$or": branches}
+
+
 class RevisionRequest(BaseModel):
     subject: str
     class_id: Optional[str] = None
@@ -955,20 +1061,7 @@ async def generate_exam(
 
     try:
         user_class = req.class_id
-
-        if not user_class:
-            raise HTTPException(
-                status_code=400,
-                detail="No class_id provided. Please specify a class."
-            )
-
-        rbac_filter = {
-            "$and": [
-                {"role": {"$eq": "teacher"}},
-                {"class_id": {"$eq": user_class}},
-                {"subject": {"$eq": req.subject}}
-            ]
-        }
+        rbac_filter = _revision_context_filter(user_id, req.subject, user_class)
 
         from langchain_pinecone import PineconeVectorStore
         vectorstore = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings)
@@ -976,9 +1069,13 @@ async def generate_exam(
         docs = vectorstore.similarity_search(query, k=15, filter=rbac_filter)
 
         if not docs:
+            where = f"{req.subject} in class {user_class}" if user_class else req.subject
             raise HTTPException(
                 status_code=404,
-                detail=f"No teaching materials found for {req.subject} in class {user_class}. Ask your teacher to upload content first."
+                detail=(
+                    f"No study materials found for {where}. "
+                    "Upload notes in Notebook (same subject and class), or ask your teacher to upload content."
+                ),
             )
 
         parent_ids = list(set([doc.metadata.get("parent_id") for doc in docs if doc.metadata.get("parent_id")]))
@@ -1048,11 +1145,7 @@ async def evaluate_exam(
     try:
         user_class = submission.class_id
         global_method = load_user_learning_method(user_id)
-
-        filter_conditions = [{"role": {"$eq": "teacher"}}, {"subject": {"$eq": submission.subject}}]
-        if user_class:
-            filter_conditions.append({"class_id": {"$eq": user_class}})
-        rbac_filter = {"$and": filter_conditions}
+        rbac_filter = _revision_context_filter(user_id, submission.subject, user_class)
 
         from langchain_pinecone import PineconeVectorStore
         vectorstore = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings)

@@ -94,7 +94,6 @@ CORS_ALLOW_ORIGINS = [o.strip() for o in CORS_ALLOW_ORIGINS_RAW.split(",") if o.
 
 
 
-# ΓöÇΓöÇΓöÇ OPERATIONAL LIMITS ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 # Redis TTL for conversation data (seconds). Default: 30 days.
 CONVERSATION_TTL_SECONDS = int(os.getenv("CONVERSATION_TTL_SECONDS", str(30 * 24 * 3600)))
 # Learning method persists longer ΓÇö 365 days default.

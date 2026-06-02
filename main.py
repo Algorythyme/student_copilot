@@ -663,12 +663,16 @@ async def chat(
             "user_profile": profile_text,
             "file_summaries": file_summaries_text
         }
-        response = await with_message_history.ainvoke(
+        response = await _invoke_ai_with_guard(
+            with_message_history,
             input_dict,
-            config={"configurable": {"session_id": req.conversation_id, "user_id": user_id}}
+            {"configurable": {"session_id": req.conversation_id, "user_id": user_id}},
+            route_name="chat",
         )
         reply = response.get("output", "I'm sorry, I couldn't process that request.")
         return {"status": "ok", "reply": reply}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[main] Agent execution error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error during chat processing.")
@@ -696,9 +700,10 @@ SUPPORTED_UPLOAD_SUFFIXES = {".pdf", ".txt", ".md"}
 _EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "15"))
 _EMBED_BATCH_PAUSE_SEC = float(os.getenv("EMBED_BATCH_PAUSE_SEC", "2"))
 _EMBED_MAX_RETRIES = int(os.getenv("EMBED_MAX_RETRIES", "4"))
+_AI_REQUEST_TIMEOUT_SEC = float(os.getenv("AI_REQUEST_TIMEOUT_SEC", "45"))
 
 
-def _is_embedding_quota_error(exc: Exception) -> bool:
+def _is_provider_quota_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     return (
         "429" in msg
@@ -706,6 +711,35 @@ def _is_embedding_quota_error(exc: Exception) -> bool:
         or "quota" in msg
         or "rate limit" in msg
     )
+
+
+def _is_embedding_quota_error(exc: Exception) -> bool:
+    return _is_provider_quota_error(exc)
+
+
+async def _invoke_ai_with_guard(chain, payload: dict, config_payload: dict | None, route_name: str):
+    """Bound external AI calls so provider quota/backoff cannot become an app outage."""
+    try:
+        return await asyncio.wait_for(
+            chain.ainvoke(payload, config=config_payload),
+            timeout=_AI_REQUEST_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"[{route_name}] AI provider timed out after {_AI_REQUEST_TIMEOUT_SEC}s; returning 503."
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="AI provider is taking too long to respond. Please retry shortly.",
+        )
+    except Exception as e:
+        if _is_provider_quota_error(e):
+            logger.warning(f"[{route_name}] AI provider quota/rate limit reached: {e}")
+            raise HTTPException(
+                status_code=503,
+                detail="AI provider quota is temporarily exhausted. Please retry later or increase provider quota.",
+            )
+        raise
 
 
 def _vectorize_to_pinecone(
@@ -962,12 +996,19 @@ async def notebook_ask(
         ])
 
         chain = prompt | llm | StrOutputParser()
-        answer = await chain.ainvoke({"context": context, "question": req.question})
+        answer = await _invoke_ai_with_guard(
+            chain,
+            {"context": context, "question": req.question},
+            None,
+            route_name="notebook.ask",
+        )
 
         return {
             "answer": answer.strip(),
             "context_sources": list(set([doc.metadata.get("source") for doc in docs]))
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[notebook] Ask failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1117,7 +1158,12 @@ async def generate_exam(
         ])
 
         chain = prompt | llm | JsonOutputParser()
-        exam = await chain.ainvoke({"context": context})
+        exam = await _invoke_ai_with_guard(
+            chain,
+            {"context": context},
+            None,
+            route_name="revision.generate",
+        )
         return exam
 
     except HTTPException:
@@ -1188,14 +1234,21 @@ async def evaluate_exam(
         ])
 
         chain = eval_prompt | llm
-        result = await chain.ainvoke({
-            "context": context,
-            "questions": json.dumps(submission.questions),
-            "answers": json.dumps(submission.answers)
-        })
+        result = await _invoke_ai_with_guard(
+            chain,
+            {
+                "context": context,
+                "questions": json.dumps(submission.questions),
+                "answers": json.dumps(submission.answers),
+            },
+            None,
+            route_name="revision.evaluate",
+        )
 
         feedback_text = result.content if hasattr(result, 'content') else str(result)
         return {"feedback": feedback_text, "status": "evaluated"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[revision] Evaluation failed: {e}")
         raise HTTPException(status_code=500, detail="Exam evaluation failed.")

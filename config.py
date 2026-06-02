@@ -7,6 +7,7 @@ import logging
 import hashlib
 import re
 import warnings
+from typing import Optional
 
 # --- Suppress unfixable 3rd-party noise ---
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
@@ -35,12 +36,15 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o")
 
-# ΓöÇΓöÇΓöÇ MODEL CONFIGURATION ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_MODEL_NAME = os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-v4-flash")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+
+# ─── MODEL CONFIGURATION ────────────────────────────────────────────────────
 # Chat model names (overridable via .env)
 GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash-lite")
 # Embedding model names
 GEMINI_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
-OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 # LLM temperature (shared across providers)
 try:
     LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
@@ -88,6 +92,11 @@ if ENFORCE_STRONG_JWT_SECRET:
 
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", "24"))
+JWT_PUBLIC_KEY = os.getenv("JWT_PUBLIC_KEY")
+JWT_ISSUER = os.getenv("JWT_ISSUER", "Pedagic School Management")
+JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "school-users")
+NEST_JWT_PUBLIC_KEY_URL = os.getenv("NEST_JWT_PUBLIC_KEY_URL")
+AUTO_INGEST_SERVICE_TOKEN: Optional[str] = os.getenv("AUTO_INGEST_SERVICE_TOKEN")
 
 CORS_ALLOW_ORIGINS_RAW = os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 CORS_ALLOW_ORIGINS = [o.strip() for o in CORS_ALLOW_ORIGINS_RAW.split(",") if o.strip()]
@@ -154,18 +163,27 @@ def redact_for_logs(value: str) -> str:
     return digest[:10]
 
 
-# --- Initial Validation ---
-if LLM_PROVIDER == "openai":
-    if not OPENAI_API_KEY:
-        logger.error("ERROR: OPENAI_API_KEY is required for OpenAI models.")
-        sys.exit(1)
-elif LLM_PROVIDER == "gemini":
-    if not GEMINI_API_KEY:
-        logger.error("ERROR: GEMINI_API_KEY is required for Gemini.")
-        sys.exit(1)
-else:
-    logger.error(f"ERROR: Unsupported LLM_PROVIDER: {LLM_PROVIDER}")
+# --- Initial Validation (registry-driven) ---
+# Map each supported provider to its required API key variable name + value.
+# Adding a new provider = one entry here + env vars above. No branching.
+SUPPORTED_PROVIDERS = {
+    "gemini":   ("GEMINI_API_KEY",   GEMINI_API_KEY),
+    "openai":   ("OPENAI_API_KEY",   OPENAI_API_KEY),
+    "deepseek": ("DEEPSEEK_API_KEY", DEEPSEEK_API_KEY),
+}
+
+if LLM_PROVIDER not in SUPPORTED_PROVIDERS:
+    logger.error(f"ERROR: Unsupported LLM_PROVIDER: '{LLM_PROVIDER}'. Supported: {', '.join(SUPPORTED_PROVIDERS)}")
     sys.exit(1)
+
+_required_key_name, _required_key_val = SUPPORTED_PROVIDERS[LLM_PROVIDER]
+if not _required_key_val:
+    logger.error(f"ERROR: {_required_key_name} is required when LLM_PROVIDER={LLM_PROVIDER}.")
+    sys.exit(1)
+
+# Gemini API key is also required as universal embedding fallback
+if LLM_PROVIDER != "gemini" and not GEMINI_API_KEY:
+    logger.warning("WARNING: GEMINI_API_KEY not set. Gemini embedding fallback will be unavailable — Pinecone vectorization may fail.")
 
 if not TAVILY_KEY:
     logger.warning("WARNING: TAVILY_API_KEY not set. Tavily web search will fail if used.")

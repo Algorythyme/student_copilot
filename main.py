@@ -1,5 +1,5 @@
 # main.py ΓÇö Sovereign AI Tutor Backend (Production-Hardened)
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Request, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Request, Form, Header
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Dict, Any, Optional, List
@@ -9,6 +9,7 @@ import os
 import json
 import time
 import hmac
+import hashlib
 import asyncio
 import collections
 
@@ -29,6 +30,7 @@ from config import (
     RATE_LIMIT_CHAT, RATE_LIMIT_GENERATE, RATE_LIMIT_UPLOAD, RATE_LIMIT_AUTH,
     TEACHER_CONTENT_TTL_SECONDS,
 )
+from nest_auth import VerifiedIdentity, verify_bearer_token
 from models import ChatRequest, ConversationItem, NewConversationRequest
 from session_manager import (
     SESSIONS, get_conversation_history, save_conversation_data_to_db,
@@ -181,29 +183,42 @@ def create_jwt(user_id: str, role: str = "student") -> str:
 def decode_jwt(token: str) -> Dict[str, Any]:
     """Decodes and validates a JWT token."""
     try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return verify_bearer_token(token).claims
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired. Please re-authenticate.")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid authentication token.")
 
 
-async def get_current_user(
+async def get_current_identity(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> VerifiedIdentity:
+    """Accepts Nest-issued JWTs and legacy local Student Copilot JWTs."""
+    if not credentials or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Authentication required. Send a valid JWT Bearer token.")
+
+    try:
+        identity = verify_bearer_token(credentials.credentials)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired. Please re-authenticate.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid authentication token.")
+
+    identity_user_id = validate_safe_string(identity.user_id, "user_id")
+    request.state.user_role = identity.role
+    request.state.school_id = identity.school_id
+    request.state.auth_source = identity.source
+    request.state.current_identity = identity
+    return identity
+
+
+async def get_current_user(
+    request: Request,
+    identity: VerifiedIdentity = Depends(get_current_identity),
 ):
     """JWT-only auth: extracts user identity from a signed Bearer token."""
-    if credentials and credentials.credentials:
-        payload = decode_jwt(credentials.credentials)
-        user_id = payload.get("sub")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Token missing 'sub' claim.")
-        user_id = validate_safe_string(user_id, "user_id")
-        # Inject role into request state for downstream use
-        request.state.user_role = payload.get("role", "student")
-        return user_id
-
-    raise HTTPException(status_code=401, detail="Authentication required. Send a valid JWT Bearer token.")
+    return validate_safe_string(identity.user_id, "user_id")
 
 
 # ─── Frontend dist detection (built by nixpacks during Railway deploy) ─────
@@ -237,13 +252,14 @@ async def health_check() -> Dict[str, str]:
 
 async def require_admin(
     request: Request,
-    user_id: str = Depends(get_current_user)
+    identity: VerifiedIdentity = Depends(get_current_identity)
 ):
     """Ensures the current user has teacher/admin privileges (JWT role or Redis dynamic set)."""
+    user_id = validate_safe_string(identity.user_id, "user_id")
     is_admin = False
     try:
         role = getattr(request.state, "user_role", None)
-        if role in ("admin", "teacher"):
+        if identity.is_admin or role in ("admin", "teacher"):
             is_admin = True
         else:
             from llm_setup import redis_client as r
@@ -786,6 +802,96 @@ def _ingest_to_pinecone(
     return len(all_child_chunks)
 
 
+def _stable_key(*parts: str) -> str:
+    raw = "::".join(str(part or "").strip() for part in parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _ingest_text_to_pinecone(
+    text: str,
+    title: str,
+    metadata_base: Dict[str, Any],
+    source_service: str,
+    source_type: str,
+    source_id: str,
+    parent_chunk_size: int = 2500,
+    redis_ttl: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Idempotent text ingestion for approved teacher artifacts."""
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_pinecone import PineconeVectorStore
+    from llm_setup import redis_client as r, embeddings as _emb
+    from config import PINECONE_INDEX_NAME
+    from database import get_supabase
+
+    cleaned_text = (text or "").strip()
+    if not cleaned_text:
+        raise HTTPException(status_code=422, detail="Approved material text_content cannot be empty.")
+    if len(cleaned_text) > 250_000:
+        raise HTTPException(status_code=413, detail="Approved material exceeds 250,000 characters.")
+
+    content_hash = hashlib.sha256(cleaned_text.encode("utf-8")).hexdigest()
+    source_key = _stable_key(source_service, source_type, source_id)
+
+    parent_splitter = RecursiveCharacterTextSplitter(chunk_size=parent_chunk_size, chunk_overlap=200)
+    child_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=50)
+
+    parent_chunks = parent_splitter.split_text(cleaned_text)
+    all_child_chunks: List[str] = []
+    metadatas: List[Dict[str, Any]] = []
+    ids: List[str] = []
+
+    for parent_idx, p_chunk in enumerate(parent_chunks):
+        parent_id = f"teacher_parent_{source_key}_{parent_idx}"
+        r.hset(parent_id, "content", p_chunk)
+        if redis_ttl and redis_ttl > 0:
+            r.expire(parent_id, redis_ttl)
+
+        supabase = get_supabase()
+        if supabase:
+            try:
+                supabase.table("parent_chunks").upsert({
+                    "id": parent_id,
+                    "content": p_chunk,
+                    "owner_id": metadata_base.get("owner_id", ""),
+                    "source": title,
+                    "role": "teacher",
+                }).execute()
+            except Exception as e:
+                logger.error(f"[auto-ingest] Supabase parent chunk write failed for {parent_id}: {e}")
+
+        children = child_splitter.split_text(p_chunk)
+        for child_idx, child in enumerate(children):
+            vector_id = f"teacher_{source_key}_{parent_idx}_{child_idx}"
+            ids.append(vector_id)
+            all_child_chunks.append(child)
+            metadatas.append({
+                **metadata_base,
+                "role": "teacher",
+                "source": title,
+                "source_service": source_service,
+                "source_type": source_type,
+                "source_id": source_id,
+                "source_key": source_key,
+                "content_hash": content_hash,
+                "approved": True,
+                "parent_id": parent_id,
+            })
+
+    if not all_child_chunks:
+        raise HTTPException(status_code=422, detail="Approved material produced no ingestible chunks.")
+
+    vectorstore = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=_emb)
+    vectorstore.add_texts(all_child_chunks, metadatas=metadatas, ids=ids)
+
+    return {
+        "chunks": len(all_child_chunks),
+        "parents": len(parent_chunks),
+        "content_hash": content_hash,
+        "source_key": source_key,
+    }
+
+
 @app.post("/notebook/upload", tags=["Notebook Oracle"])
 @limiter.limit(RATE_LIMIT_UPLOAD)
 async def notebook_upload(
@@ -865,6 +971,9 @@ async def notebook_ask(
                 {"role": {"$eq": "teacher"}},
                 {"class_id": {"$eq": user_class}}
             ]}
+            school_id = getattr(request.state, "school_id", None)
+            if school_id:
+                teacher_filter["$and"].append({"school_id": {"$eq": school_id}})
             if allowed_subjects:
                 teacher_filter["$and"].append({"subject": {"$in": allowed_subjects}})
             filter_conditions.append(teacher_filter)
@@ -929,6 +1038,133 @@ async def notebook_ask(
 # =============================================================================
 # TEACHER ADMINISTRATIVE MODULE (Admin-gated)
 # =============================================================================
+
+class AutoIngestRequest(BaseModel):
+    source_service: str
+    source_type: str
+    source_id: str
+    school_id: str
+    class_id: str
+    subject_id: Optional[str] = None
+    subject_name: str
+    title: str
+    text_content: str
+
+    @field_validator("source_service", "source_type", "source_id", "school_id", "class_id", "subject_id", mode="before")
+    @classmethod
+    def sanitize_ids(cls, v, info):
+        if v is None:
+            return v
+        return validate_safe_string(str(v), info.field_name)
+
+    @field_validator("subject_name", "title", mode="before")
+    @classmethod
+    def sanitize_names(cls, v, info):
+        return validate_safe_name(str(v), info.field_name)
+
+    @field_validator("source_type", mode="after")
+    @classmethod
+    def validate_source_type(cls, v):
+        v = v.lower()
+        allowed = {"lesson_note", "student_handout", "handout", "class_note"}
+        if v not in allowed:
+            raise ValueError(f"source_type must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+
+def _is_valid_auto_ingest_service_token(token: Optional[str]) -> bool:
+    expected = config.AUTO_INGEST_SERVICE_TOKEN
+    if not expected or not token:
+        return False
+    return hmac.compare_digest(token, expected)
+
+
+async def authorize_auto_ingest(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials],
+    service_token: Optional[str],
+) -> str:
+    if _is_valid_auto_ingest_service_token(service_token):
+        request.state.user_role = "service"
+        request.state.auth_source = "service-token"
+        return "service:auto-ingest"
+
+    if not credentials or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Auto-ingest requires a teacher/admin JWT or internal service token.")
+
+    try:
+        identity = verify_bearer_token(credentials.credentials)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired. Please re-authenticate.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid authentication token.")
+
+    if not identity.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden: Teacher/admin privileges required for auto-ingest.")
+
+    request.state.user_role = identity.role
+    request.state.school_id = identity.school_id
+    request.state.auth_source = identity.source
+    request.state.current_identity = identity
+    return validate_safe_string(identity.user_id, "user_id")
+
+
+@app.post("/teacher/auto-ingest", tags=["Teacher Administrative"])
+@limiter.limit(RATE_LIMIT_UPLOAD)
+async def teacher_auto_ingest(
+    request: Request,
+    req: AutoIngestRequest,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    x_auto_ingest_token: Optional[str] = Header(default=None, alias="X-Auto-Ingest-Token"),
+):
+    actor_id = await authorize_auto_ingest(request, credentials, x_auto_ingest_token)
+
+    from config import PINECONE_API_KEY
+    from llm_setup import embeddings
+
+    if not PINECONE_API_KEY or not embeddings:
+        raise HTTPException(status_code=500, detail="Pinecone not configured.")
+
+    logger.info(
+        "[auto-ingest] Approved material ingest requested "
+        f"source={req.source_service}/{req.source_type}/{req.source_id} "
+        f"school={req.school_id} class={req.class_id} subject={req.subject_id or req.subject_name}"
+    )
+
+    teacher_ttl = TEACHER_CONTENT_TTL_SECONDS if TEACHER_CONTENT_TTL_SECONDS > 0 else None
+    try:
+        result = _ingest_text_to_pinecone(
+            text=req.text_content,
+            title=req.title,
+            source_service=req.source_service,
+            source_type=req.source_type,
+            source_id=req.source_id,
+            metadata_base={
+                "owner_id": actor_id,
+                "school_id": req.school_id,
+                "class_id": req.class_id,
+                "subject_id": req.subject_id or req.subject_name,
+                "subject": req.subject_name,
+                "subject_name": req.subject_name,
+            },
+            redis_ttl=teacher_ttl,
+        )
+        return {
+            "status": "ingested",
+            "source_service": req.source_service,
+            "source_type": req.source_type,
+            "source_id": req.source_id,
+            "school_id": req.school_id,
+            "class_id": req.class_id,
+            "subject_id": req.subject_id,
+            "subject_name": req.subject_name,
+            **result,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[auto-ingest] Failed for {req.source_service}/{req.source_type}/{req.source_id}: {e}")
+        raise HTTPException(status_code=500, detail="Auto-ingest processing failed.")
 
 @app.post("/teacher/upload", tags=["Teacher Administrative"])
 @limiter.limit(RATE_LIMIT_UPLOAD)
@@ -1050,6 +1286,9 @@ async def generate_exam(
                 {"subject": {"$eq": req.subject}}
             ]
         }
+        school_id = getattr(request.state, "school_id", None)
+        if school_id:
+            rbac_filter["$and"].append({"school_id": {"$eq": school_id}})
 
         from langchain_pinecone import PineconeVectorStore
         vectorstore = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings)
@@ -1133,6 +1372,9 @@ async def evaluate_exam(
         filter_conditions = [{"role": {"$eq": "teacher"}}, {"subject": {"$eq": submission.subject}}]
         if user_class:
             filter_conditions.append({"class_id": {"$eq": user_class}})
+        school_id = getattr(request.state, "school_id", None)
+        if school_id:
+            filter_conditions.append({"school_id": {"$eq": school_id}})
         rbac_filter = {"$and": filter_conditions}
 
         from langchain_pinecone import PineconeVectorStore

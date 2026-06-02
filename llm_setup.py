@@ -1,10 +1,9 @@
-# llm_setup.py
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
+# llm_setup.py — Modular provider registry. Switch LLM via .env only.
 from config import (
-    OPENAI_API_KEY, OPENAI_MODEL_NAME, REDIS_URL, logger, LLM_PROVIDER, 
+    OPENAI_API_KEY, OPENAI_MODEL_NAME, REDIS_URL, logger, LLM_PROVIDER,
     GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_INDEX_NAME, PINECONE_CLOUD, PINECONE_REGION,
-    GEMINI_MODEL_NAME, GEMINI_EMBEDDING_MODEL, OPENAI_EMBEDDING_MODEL, LLM_TEMPERATURE
+    GEMINI_MODEL_NAME, GEMINI_EMBEDDING_MODEL, LLM_TEMPERATURE,
+    DEEPSEEK_API_KEY, DEEPSEEK_MODEL_NAME, DEEPSEEK_BASE_URL,
 )
 import sys
 import time
@@ -13,45 +12,98 @@ import time
 try:
     import redis
 except ImportError:
-    logger.error("ERROR: 'redis' package not found. Please install it with `pip install redis`.") # Changed from print
+    logger.error("ERROR: 'redis' package not found. Please install it with `pip install redis`.")
     sys.exit(1)
 
 
-# --- LLM and Embeddings Initialization ---
+# ─── PROVIDER REGISTRY ─────────────────────────────────────────────────────
+# Each entry: { "chat_factory": callable() -> llm, "embeddings_factory": callable() -> embeddings | None }
+# If embeddings_factory returns None, Gemini embeddings are used as universal fallback.
+# Adding a new OpenAI-compatible provider = one new entry here + env vars in config.py.
+
+def _gemini_chat():
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    return ChatGoogleGenerativeAI(
+        model=GEMINI_MODEL_NAME,
+        google_api_key=GEMINI_API_KEY,
+        temperature=LLM_TEMPERATURE,
+    )
+
+def _gemini_embeddings():
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings
+    return GoogleGenerativeAIEmbeddings(
+        model=GEMINI_EMBEDDING_MODEL,
+        google_api_key=GEMINI_API_KEY,
+    )
+
+def _openai_chat():
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        model=OPENAI_MODEL_NAME,
+        temperature=LLM_TEMPERATURE,
+        streaming=True,
+    )
+
+def _deepseek_chat():
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(
+        api_key=DEEPSEEK_API_KEY,
+        base_url=DEEPSEEK_BASE_URL,
+        model=DEEPSEEK_MODEL_NAME,
+        temperature=LLM_TEMPERATURE,
+        streaming=True,
+    )
+
+# All providers use Gemini embeddings (universal). embeddings_factory=None → Gemini fallback.
+PROVIDER_REGISTRY = {
+    "gemini": {
+        "chat_factory": _gemini_chat,
+        "embeddings_factory": _gemini_embeddings,
+    },
+    "openai": {
+        "chat_factory": _openai_chat,
+        "embeddings_factory": None,  # → Gemini embeddings
+    },
+    "deepseek": {
+        "chat_factory": _deepseek_chat,
+        "embeddings_factory": None,  # → Gemini embeddings
+    },
+}
+
+
+# ─── INITIALIZATION ─────────────────────────────────────────────────────────
+def _init_provider(provider_name: str):
+    """Instantiate LLM + embeddings from the registry. Returns (llm, embeddings)."""
+    entry = PROVIDER_REGISTRY.get(provider_name)
+    if not entry:
+        logger.error(f"[startup] Unknown LLM_PROVIDER: '{provider_name}'. Registered: {', '.join(PROVIDER_REGISTRY)}")
+        sys.exit(1)
+
+    chat = entry["chat_factory"]()
+    logger.info(f"[startup] LLM initialized: provider={provider_name}")
+
+    emb_factory = entry.get("embeddings_factory")
+    if emb_factory:
+        emb = emb_factory()
+        logger.info(f"[startup] Embeddings initialized: provider={provider_name}")
+    elif GEMINI_API_KEY:
+        # Universal fallback — Gemini embeddings
+        emb = _gemini_embeddings()
+        logger.info(f"[startup] Embeddings initialized: Gemini fallback (provider={provider_name} has no embeddings)")
+    else:
+        emb = None
+        logger.warning(f"[startup] No embeddings available for provider={provider_name} and GEMINI_API_KEY not set.")
+
+    return chat, emb
+
+
 llm = None
 embeddings = None
 try:
-    if LLM_PROVIDER == "gemini":
-        llm = ChatGoogleGenerativeAI(
-            model=GEMINI_MODEL_NAME, # Minimalist & high speed
-            google_api_key=GEMINI_API_KEY,
-            temperature=LLM_TEMPERATURE,
-        )
-        # Import moved here to avoid crash if not using gemini
-        from langchain_google_genai import GoogleGenerativeAIEmbeddings
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model=GEMINI_EMBEDDING_MODEL, 
-            google_api_key=GEMINI_API_KEY
-        )
-        logger.info(f"[startup] Google Gemini LLM ({GEMINI_MODEL_NAME}) and Embeddings initialized successfully.")
-    elif LLM_PROVIDER == "openai":
-        llm = ChatOpenAI(
-            api_key=OPENAI_API_KEY,
-            model=OPENAI_MODEL_NAME,
-            temperature=LLM_TEMPERATURE,
-            streaming=True
-        )
-        from langchain_openai import OpenAIEmbeddings
-        embeddings = OpenAIEmbeddings(
-            api_key=OPENAI_API_KEY,
-            model=OPENAI_EMBEDDING_MODEL # Standard high-performance OpenAI embedding model
-        )
-        logger.info(f"[startup] Standard OpenAI LLM ({OPENAI_MODEL_NAME}) and Embeddings ({OPENAI_EMBEDDING_MODEL}) initialized successfully.")
-    else:
-        logger.error(f"[startup] Unknown LLM_PROVIDER specified: {LLM_PROVIDER}")
-        sys.exit(1)
+    llm, embeddings = _init_provider(LLM_PROVIDER)
 except Exception as e:
-    logger.error(f"[startup] Failed to initialize LLM/Embeddings ({LLM_PROVIDER}): {e}") # Changed from print
+    logger.error(f"[startup] Failed to initialize LLM/Embeddings ({LLM_PROVIDER}): {e}")
     sys.exit(1)
 
 def _ensure_pinecone_index() -> None:
@@ -73,7 +125,7 @@ def _ensure_pinecone_index() -> None:
         dim = len(test_embed[0])
     except Exception as e:
         logger.warning(f"[startup] Dynamic dim detection failed. Fallback: {e}")
-        dim = 768 if LLM_PROVIDER == "gemini" else 1536
+        dim = 768  # Gemini embedding-001 — universal embedding provider
 
     try:
         pc = Pinecone(api_key=PINECONE_API_KEY)

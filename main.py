@@ -28,9 +28,10 @@ from config import (
     logger, JWT_SECRET, JWT_ALGORITHM, JWT_EXPIRY_HOURS,
     validate_safe_string, validate_safe_name,
     RATE_LIMIT_CHAT, RATE_LIMIT_GENERATE, RATE_LIMIT_UPLOAD, RATE_LIMIT_AUTH,
-    TEACHER_CONTENT_TTL_SECONDS,
+    TEACHER_CONTENT_TTL_SECONDS, PEDAGIC_PROVISION_SECRET,
 )
 from nest_auth import VerifiedIdentity, verify_bearer_token
+from security import get_current_identity, get_current_user, bearer_scheme
 from models import ChatRequest, ConversationItem, NewConversationRequest
 from session_manager import (
     SESSIONS, get_conversation_history, save_conversation_data_to_db,
@@ -101,7 +102,6 @@ def error_json(code: int, error: str, detail: str = None) -> JSONResponse:
     )
 
 # ΓöÇΓöÇΓöÇ SINGLE FastAPI Instance ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-bearer_scheme = HTTPBearer(auto_error=False)
 
 app = FastAPI(
     title="student_copilot ΓÇö Sovereign AI Tutor",
@@ -138,7 +138,6 @@ app.openapi_tags = [
     {"name": "Conversation Management", "description": "User and conversation lifecycle."},
     {"name": "AI Tutor Core", "description": "Chat and file upload endpoints."},
     {"name": "Notebook Oracle", "description": "Ground-truth retrieval from vectorized documents."},
-    {"name": "Teacher Administrative", "description": "Admin-only knowledge curation."},
     {"name": "Revision Mode", "description": "Socratic assessment engine."},
 ]
 
@@ -190,37 +189,6 @@ def decode_jwt(token: str) -> Dict[str, Any]:
         raise HTTPException(status_code=401, detail="Invalid authentication token.")
 
 
-async def get_current_identity(
-    request: Request,
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-) -> VerifiedIdentity:
-    """Accepts Nest-issued JWTs and legacy local Student Copilot JWTs."""
-    if not credentials or not credentials.credentials:
-        raise HTTPException(status_code=401, detail="Authentication required. Send a valid JWT Bearer token.")
-
-    try:
-        identity = verify_bearer_token(credentials.credentials)
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired. Please re-authenticate.")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid authentication token.")
-
-    identity_user_id = validate_safe_string(identity.user_id, "user_id")
-    request.state.user_role = identity.role
-    request.state.school_id = identity.school_id
-    request.state.auth_source = identity.source
-    request.state.current_identity = identity
-    return identity
-
-
-async def get_current_user(
-    request: Request,
-    identity: VerifiedIdentity = Depends(get_current_identity),
-):
-    """JWT-only auth: extracts user identity from a signed Bearer token."""
-    return validate_safe_string(identity.user_id, "user_id")
-
-
 # ─── Frontend dist detection (built by nixpacks during Railway deploy) ─────
 _FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 _FRONTEND_INDEX = os.path.join(_FRONTEND_DIST, "index.html")
@@ -241,10 +209,15 @@ async def root():
 @app.get("/health")
 async def health_check() -> Dict[str, str]:
     from session_manager import redis_client as r
+    from db.connection import db_connection
+
     try:
         if r:
             r.ping()
-        return {"status": "ok"}
+        with db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+        return {"status": "ok", "db_backend": "postgres"}
     except Exception as e:
         logger.error(f"[health] Health check failed: {e}")
         raise HTTPException(status_code=503, detail="Health check failed")
@@ -311,13 +284,150 @@ class UserRegistration(BaseModel):
     @classmethod
     def sanitize_role(cls, v):
         role = validate_safe_string(v, "role").lower()
-        if role not in {"student", "teacher"}:
-            raise ValueError("role must be 'student' or 'teacher'")
+        if role != "student":
+            raise ValueError("role must be 'student'")
         return role
 
 class TokenRequest(BaseModel):
     username: str
     password: str
+
+
+def _hash_password(password: str) -> str:
+    import hashlib
+    import secrets
+
+    salt = secrets.token_hex(16)
+    hashed_pw = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), salt.encode(), PBKDF2_ITERATIONS
+    ).hex()
+    return f"{salt}:{hashed_pw}"
+
+
+class PedagicProvisionRequest(BaseModel):
+    """Upsert a Pedagic-linked copilot user (`pedagic_{schoolUserId}`)."""
+
+    username: str
+    password: str
+    full_name: str
+    role: str = "student"
+    class_id: Optional[str] = None
+    subjects: Optional[str] = None
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def sanitize_username(cls, v, info):
+        cleaned = validate_safe_string(v, info.field_name)
+        if not cleaned.startswith("pedagic_"):
+            raise ValueError("username must start with 'pedagic_'")
+        return cleaned
+
+    @field_validator("full_name", mode="before")
+    @classmethod
+    def sanitize_full_name(cls, v, info):
+        return validate_safe_name(v, info.field_name)
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def validate_password(cls, v):
+        if not v or len(v) < MIN_PASSWORD_LENGTH:
+            raise ValueError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+        return v
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def sanitize_role(cls, v):
+        role = validate_safe_string(v, "role").lower()
+        if role not in ("student", "admin"):
+            raise ValueError("role must be 'student' or 'admin'")
+        return role
+
+
+@app.post("/auth/pedagic-provision", tags=["Authentication"])
+@limiter.limit(RATE_LIMIT_AUTH)
+async def pedagic_provision_user(request: Request, req: PedagicProvisionRequest):
+    """
+    Creates or updates a Pedagic-linked copilot account.
+    Requires header X-Pedagic-Provision-Key matching PEDAGIC_PROVISION_SECRET.
+    """
+    import hashlib
+    from database import get_supabase
+    from llm_setup import redis_client as r
+
+    if not PEDAGIC_PROVISION_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="Pedagic provisioning is not configured on this server.",
+        )
+
+    provided = request.headers.get("X-Pedagic-Provision-Key", "")
+    if not provided or not hmac.compare_digest(provided, PEDAGIC_PROVISION_SECRET):
+        raise HTTPException(status_code=403, detail="Invalid provision key.")
+
+    supabase = get_supabase()
+    if not supabase:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Student Copilot database is not configured. "
+                "Check DATABASE_URL uses a public Railway proxy (*.proxy.rlwy.net?schema=student_copilot&sslmode=require)."
+            ),
+        )
+
+    stored_hash = _hash_password(req.password)
+    profile_data = {
+        "user_id": req.username,
+        "username": req.username,
+        "password_hash": stored_hash,
+        "role": req.role,
+        "full_name": req.full_name,
+        "country": "",
+        "class_id": req.class_id or "",
+        "subjects": req.subjects or "",
+        "learning_method": "",
+    }
+
+    existing = (
+        supabase.table("users")
+        .select("user_id")
+        .eq("user_id", req.username)
+        .execute()
+    )
+
+    try:
+        if existing.data:
+            supabase.table("users").update(
+                {
+                    "password_hash": stored_hash,
+                    "full_name": req.full_name,
+                    "role": req.role,
+                    "class_id": req.class_id or "",
+                    "subjects": req.subjects or "",
+                }
+            ).eq("user_id", req.username).execute()
+            logger.info(f"[auth] Pedagic provision updated: {req.username}")
+        else:
+            supabase.table("users").insert(profile_data).execute()
+            logger.info(f"[auth] Pedagic provision created: {req.username}")
+    except Exception as e:
+        logger.error(f"[auth] Pedagic provision error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to provision user.")
+
+    if r:
+        r.hset(
+            f"user:{req.username}:profile",
+            mapping={k: str(v) if v is not None else "" for k, v in profile_data.items()},
+        )
+
+    token = create_jwt(req.username, req.role)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in_hours": JWT_EXPIRY_HOURS,
+        "user_id": req.username,
+        "role": req.role,
+    }
+
 
 @app.post("/auth/register", tags=["Authentication"])
 @limiter.limit(RATE_LIMIT_AUTH)
@@ -330,10 +440,16 @@ async def register_user(request: Request, req: UserRegistration):
 
     supabase = get_supabase()
     if not supabase:
-        raise HTTPException(status_code=500, detail="Database persistence not configured.")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Student Copilot database is not configured. "
+                "Check DATABASE_URL uses a public Railway proxy (*.proxy.rlwy.net?schema=student_copilot&sslmode=require)."
+            ),
+        )
 
     # Check if user exists in Supabase
-    existing_user = supabase.table('users').select('username').eq('username', req.username).execute()
+    existing_user = supabase.table('users').select('user_id').eq('user_id', req.username).execute()
     if existing_user.data:
         raise HTTPException(status_code=400, detail="Username already exists.")
 
@@ -344,6 +460,7 @@ async def register_user(request: Request, req: UserRegistration):
     stored_hash = f"{salt}:{hashed_pw}"
 
     profile_data = {
+        "user_id": req.username,
         "username": req.username,
         "password_hash": stored_hash,
         "role": req.role,
@@ -364,9 +481,7 @@ async def register_user(request: Request, req: UserRegistration):
     # Save a cached version as strings for fast fallback
     r.hset(f"user:{req.username}:profile", mapping={k: str(v) if v is not None else "" for k, v in profile_data.items()})
     
-    # If registering as teacher, add to dynamic admin set
-    if req.role == "teacher":
-        r.sadd("system:admins", req.username)
+
 
     logger.info(f"[auth] Registered new {req.role}: {req.username}")
     
@@ -391,9 +506,15 @@ async def login_for_token(request: Request, req: TokenRequest):
     
     supabase = get_supabase()
     if not supabase:
-        raise HTTPException(status_code=500, detail="Database persistence not configured.")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Student Copilot database is not configured. "
+                "Check DATABASE_URL uses a public Railway proxy (*.proxy.rlwy.net?schema=student_copilot&sslmode=require)."
+            ),
+        )
         
-    res = supabase.table('users').select('*').eq('username', req.username).execute()
+    res = supabase.table('users').select('*').eq('user_id', req.username).execute()
     if not res.data:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
     
@@ -431,17 +552,42 @@ async def login_for_token(request: Request, req: TokenRequest):
 
 
 @app.get("/users/me", tags=["Authentication"])
-async def get_my_profile(user_id: str = Depends(get_current_user)):
-    """Returns the current user's personalized data from Supabase."""
+async def get_my_profile(
+    request: Request,
+    user_id: str = Depends(get_current_user),
+):
+    """Returns the current user's profile (Nest JWT or legacy local account)."""
     from database import get_supabase
     
     supabase = get_supabase()
     if not supabase:
-        raise HTTPException(status_code=500, detail="Database persistence not configured.")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Student Copilot database is not configured. "
+                "Check DATABASE_URL uses a public Railway proxy (*.proxy.rlwy.net?schema=student_copilot&sslmode=require)."
+            ),
+        )
         
-    res = supabase.table('users').select('*').eq('username', user_id).execute()
+    identity = getattr(request.state, "current_identity", None)
+    if identity and getattr(request.state, "auth_source", None) in (
+        "nest-rs256",
+        "nest-hs256",
+        "disabled",
+        "disabled-anonymous",
+    ):
+        return {
+            "user_id": user_id,
+            "username": user_id,
+            "role": identity.role,
+            "full_name": identity.email or user_id,
+            "school_id": getattr(request.state, "school_id", None),
+            "learning_method": load_user_learning_method(user_id) or "",
+        }
+
+    res = supabase.table('users').select('*').eq('user_id', user_id).execute()
     if not res.data:
-        raise HTTPException(status_code=404, detail="User profile not found in Supabase.")
+        raise HTTPException(status_code=404, detail="User profile not found.")
         
     profile_out = res.data[0]
     # Remove auth secrets before returning
@@ -723,8 +869,9 @@ class NotebookQuestionRequest(BaseModel):
     question: str
     active_subject: Optional[str] = None
     active_class: Optional[str] = None
+    active_source: Optional[str] = None
 
-    @field_validator("active_subject", "active_class", mode="before")
+    @field_validator("active_subject", "active_class", "active_source", mode="before")
     @classmethod
     def sanitize_optional(cls, v):
         if v is not None and v.strip():
@@ -732,6 +879,69 @@ class NotebookQuestionRequest(BaseModel):
         return v
 
 SUPPORTED_UPLOAD_SUFFIXES = {".pdf", ".txt", ".md"}
+
+# Stay under Gemini free-tier embed_content limits (~100 req/min per project).
+_EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "15"))
+_EMBED_BATCH_PAUSE_SEC = float(os.getenv("EMBED_BATCH_PAUSE_SEC", "2"))
+_EMBED_MAX_RETRIES = int(os.getenv("EMBED_MAX_RETRIES", "4"))
+
+
+def _is_embedding_quota_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "429" in msg
+        or "resource_exhausted" in msg
+        or "quota" in msg
+        or "rate limit" in msg
+    )
+
+
+def _vectorize_to_pinecone(
+    texts: List[str],
+    metadatas: List[dict],
+    embedding,
+    index_name: str,
+) -> None:
+    """Embed child chunks in small batches with backoff on provider rate limits."""
+    from langchain_pinecone import PineconeVectorStore
+
+    if not texts:
+        return
+
+    for batch_idx, start in enumerate(range(0, len(texts), _EMBED_BATCH_SIZE)):
+        batch_texts = texts[start : start + _EMBED_BATCH_SIZE]
+        batch_meta = metadatas[start : start + _EMBED_BATCH_SIZE]
+        first_batch = batch_idx == 0
+
+        for attempt in range(_EMBED_MAX_RETRIES):
+            try:
+                if first_batch:
+                    PineconeVectorStore.from_texts(
+                        batch_texts,
+                        embedding=embedding,
+                        index_name=index_name,
+                        metadatas=batch_meta,
+                    )
+                else:
+                    store = PineconeVectorStore.from_existing_index(
+                        index_name=index_name,
+                        embedding=embedding,
+                    )
+                    store.add_texts(batch_texts, metadatas=batch_meta)
+                break
+            except Exception as e:
+                if _is_embedding_quota_error(e) and attempt < _EMBED_MAX_RETRIES - 1:
+                    wait = min(60, 22 * (attempt + 1))
+                    logger.warning(
+                        f"[ingest] Embedding rate limited; retrying batch {batch_idx + 1} "
+                        f"in {wait}s (attempt {attempt + 1}/{_EMBED_MAX_RETRIES})"
+                    )
+                    time.sleep(wait)
+                    continue
+                raise
+
+        if start + _EMBED_BATCH_SIZE < len(texts) and _EMBED_BATCH_PAUSE_SEC > 0:
+            time.sleep(_EMBED_BATCH_PAUSE_SEC)
 
 
 def _ingest_to_pinecone(
@@ -745,7 +955,6 @@ def _ingest_to_pinecone(
     """Shared ingestion: extract text → parent/child chunk → store parents in Redis+Supabase → vectorize children in Pinecone.
     Returns the total number of child chunks ingested."""
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_pinecone import PineconeVectorStore
     from llm_setup import redis_client as r, embeddings as _emb
     from config import PINECONE_INDEX_NAME
     from database import get_supabase
@@ -795,9 +1004,11 @@ def _ingest_to_pinecone(
             "parent_id": parent_id,
         } for _ in children])
 
-    PineconeVectorStore.from_texts(
-        all_child_chunks, embedding=_emb,
-        index_name=PINECONE_INDEX_NAME, metadatas=metadatas
+    _vectorize_to_pinecone(
+        all_child_chunks,
+        metadatas,
+        _emb,
+        PINECONE_INDEX_NAME,
     )
     return len(all_child_chunks)
 
@@ -937,6 +1148,14 @@ async def notebook_upload(
         raise
     except Exception as e:
         logger.error(f"[notebook] Upload failed: {e}")
+        if _is_embedding_quota_error(e):
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Gemini embedding quota exceeded (free tier ~100 requests/minute). "
+                    "Wait about a minute and try again with a smaller file, or upgrade your Google AI API plan."
+                ),
+            )
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(tmp_path):
@@ -950,7 +1169,10 @@ async def notebook_ask(
     req: NotebookQuestionRequest,
     user_id: str = Depends(get_current_user)
 ):
-    logger.info(f"[notebook] User {user_id} asking grounded question on Subject: {req.active_subject}")
+    logger.info(
+        f"[notebook] User {user_id} asking on subject={req.active_subject!r} "
+        f"class={req.active_class!r} source={req.active_source!r}"
+    )
     from config import PINECONE_API_KEY, PINECONE_INDEX_NAME
     from llm_setup import llm, embeddings, redis_client as r
     from session_manager import load_user_learning_method
@@ -982,7 +1204,7 @@ async def notebook_ask(
 
         from langchain_pinecone import PineconeVectorStore
         vectorstore = PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings)
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 5, "filter": rbac_filter})
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 8, "filter": rbac_filter})
 
         docs = retriever.invoke(req.question)
         
@@ -1224,6 +1446,69 @@ async def teacher_upload(
 # REVISION & ASSESSMENT MODULE
 # =============================================================================
 
+def _notebook_context_filter(
+    user_id: str,
+    subject: Optional[str],
+    class_id: Optional[str] = None,
+    active_source: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Scope notebook RAG to one uploaded file or all notes for a subject."""
+    if subject and active_source:
+        clauses: List[Dict[str, Any]] = [
+            {"owner_id": {"$eq": user_id}},
+            {"role": {"$eq": "student"}},
+            {"subject": {"$eq": subject}},
+            {"source": {"$eq": active_source}},
+        ]
+        if class_id:
+            clauses.append({
+                "$or": [
+                    {"class_id": {"$eq": class_id}},
+                    {"class_id": {"$eq": "General"}},
+                ]
+            })
+        return {"$and": clauses}
+
+    if subject:
+        return _revision_context_filter(user_id, subject, class_id)
+
+    return {"owner_id": {"$eq": user_id}}
+
+
+def _revision_context_filter(
+    user_id: str,
+    subject: str,
+    class_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Match teacher class materials and this user's notebook uploads (same subject/class)."""
+    branches: List[Dict[str, Any]] = []
+
+    student_clauses: List[Dict[str, Any]] = [
+        {"owner_id": {"$eq": user_id}},
+        {"role": {"$eq": "student"}},
+        {"subject": {"$eq": subject}},
+    ]
+    if class_id:
+        student_clauses.append({
+            "$or": [
+                {"class_id": {"$eq": class_id}},
+                {"class_id": {"$eq": "General"}},
+            ]
+        })
+    branches.append({"$and": student_clauses})
+
+    if class_id:
+        branches.append({
+            "$and": [
+                {"role": {"$eq": "teacher"}},
+                {"class_id": {"$eq": class_id}},
+                {"subject": {"$eq": subject}},
+            ]
+        })
+
+    return branches[0] if len(branches) == 1 else {"$or": branches}
+
+
 class RevisionRequest(BaseModel):
     subject: str
     class_id: Optional[str] = None
@@ -1296,9 +1581,13 @@ async def generate_exam(
         docs = vectorstore.similarity_search(query, k=15, filter=rbac_filter)
 
         if not docs:
+            where = f"{req.subject} in class {user_class}" if user_class else req.subject
             raise HTTPException(
                 status_code=404,
-                detail=f"No teaching materials found for {req.subject} in class {user_class}. Ask your teacher to upload content first."
+                detail=(
+                    f"No study materials found for {where}. "
+                    "Upload notes in Notebook (same subject and class), or ask your teacher to upload content."
+                ),
             )
 
         parent_ids = list(set([doc.metadata.get("parent_id") for doc in docs if doc.metadata.get("parent_id")]))

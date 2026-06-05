@@ -1,21 +1,25 @@
-# database.py
+# database.py — Postgres student_copilot schema (Supabase-compatible table API)
 from typing import Optional
-from supabase import create_client, Client
-from config import logger, SUPABASE_URL, SUPABASE_KEY
 
-supabase: Optional[Client] = None
+from config import logger
 
-if SUPABASE_URL and SUPABASE_KEY:
+_store = None
+
+
+def get_db_store():
+    global _store
+    if _store is None:
+        from db.postgres_store import PostgresStore
+
+        _store = PostgresStore()
+        logger.info("[database] Postgres student_copilot store initialized.")
+    return _store
+
+
+def get_supabase():
+    """Compatibility alias — returns Postgres store instead of Supabase client."""
     try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logger.info("[database] Supabase client initialized successfully.")
-    except Exception as e:
-        logger.error(f"[database] Failed to initialize Supabase client: {e}")
-else:
-    logger.warning("[database] Supabase credentials missing. Client not initialized.")
-
-def get_supabase() -> Optional[Client]:
-    """Returns the initialized Supabase client."""
-    if not supabase:
-        logger.error("[database] Attempted to use Supabase client before initialization or without credentials.")
-    return supabase
+        return get_db_store()
+    except Exception as exc:
+        logger.error("[database] Postgres store unavailable: %s", exc)
+        return None

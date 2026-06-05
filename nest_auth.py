@@ -14,6 +14,10 @@ from config import (
     logger,
 )
 
+STUDENT_COPILOT_ROLES = {
+    "STUDENT",
+    "student",
+}
 
 ADMIN_ROLES = {
     "admin",
@@ -33,6 +37,7 @@ class VerifiedIdentity:
     user_id: str
     role: str
     school_id: Optional[str]
+    email: Optional[str]
     claims: Dict[str, Any]
     source: str
 
@@ -42,6 +47,11 @@ class VerifiedIdentity:
 
 
 _cached_public_key: Optional[str] = None
+
+
+def is_student_copilot_role(role: str) -> bool:
+    normalized = (role or "").upper()
+    return normalized in {r.upper() for r in STUDENT_COPILOT_ROLES} or role in STUDENT_COPILOT_ROLES
 
 
 def _load_public_key() -> Optional[str]:
@@ -57,12 +67,11 @@ def _load_public_key() -> Optional[str]:
         return None
 
     try:
+        import json
         import urllib.request
 
         with urllib.request.urlopen(NEST_JWT_PUBLIC_KEY_URL, timeout=5) as resp:
             body = resp.read().decode("utf-8")
-        import json
-
         payload = json.loads(body)
         data = payload.get("data") if isinstance(payload, dict) else None
         public_key = None
@@ -74,7 +83,7 @@ def _load_public_key() -> Optional[str]:
             _cached_public_key = str(public_key).replace("\\n", "\n").strip()
             return _cached_public_key
     except Exception as exc:
-        logger.warning(f"[auth] Could not fetch Nest JWT public key: {exc}")
+        logger.warning("[auth] Could not fetch Nest JWT public key: %s", exc)
 
     return None
 
@@ -83,45 +92,77 @@ def _identity_from_claims(claims: Dict[str, Any], source: str) -> VerifiedIdenti
     user_id = claims.get("sub") or claims.get("userId") or claims.get("user_id")
     if not user_id:
         raise jwt.InvalidTokenError("Token missing subject claim")
-    role = str(claims.get("role") or "student")
     school_id = claims.get("schoolId") or claims.get("tenantId") or claims.get("school_id")
     return VerifiedIdentity(
         user_id=str(user_id),
-        role=role,
+        role=str(claims.get("role") or "student"),
         school_id=str(school_id) if school_id else None,
+        email=claims.get("email"),
         claims=claims,
         source=source,
     )
 
 
+def identity_from_token_unverified(token: str) -> VerifiedIdentity:
+    """Read Nest claims without signature check — staging/dev only when AUTH_DISABLED."""
+    claims = jwt.decode(
+        token,
+        options={
+            "verify_signature": False,
+            "verify_exp": False,
+            "verify_aud": False,
+            "verify_iss": False,
+        },
+    )
+    return _identity_from_claims(claims, "disabled")
+
+
 def verify_bearer_token(token: str) -> VerifiedIdentity:
-    """Verify either a Nest-issued JWT or the legacy local Student Copilot JWT."""
-    public_key = _load_public_key()
-    if public_key:
-        try:
-            claims = jwt.decode(
-                token,
-                public_key,
-                algorithms=["RS256"],
-                issuer=JWT_ISSUER,
-                audience=JWT_AUDIENCE,
-            )
-            return _identity_from_claims(claims, "nest-rs256")
-        except jwt.InvalidTokenError as exc:
-            logger.debug(f"[auth] RS256 verification did not match token: {exc}")
+    decode_opts = {
+        "issuer": JWT_ISSUER,
+        "audience": JWT_AUDIENCE,
+    }
 
     try:
+        header = jwt.get_unverified_header(token)
+    except jwt.DecodeError as exc:
+        raise jwt.InvalidTokenError("Invalid token header") from exc
+
+    alg = (header.get("alg") or "").upper()
+
+    if alg == "RS256":
+        public_key = _load_public_key()
+        if not public_key:
+            raise jwt.InvalidTokenError(
+                "Token is RS256 but Nest public key is not configured "
+                "(set JWT_PUBLIC_KEY or NEST_JWT_PUBLIC_KEY_URL)"
+            )
         claims = jwt.decode(
             token,
-            JWT_SECRET,
-            algorithms=["HS256"],
-            issuer=JWT_ISSUER,
-            audience=JWT_AUDIENCE,
+            public_key,
+            algorithms=["RS256"],
+            **decode_opts,
         )
-        return _identity_from_claims(claims, "nest-hs256")
-    except jwt.InvalidTokenError:
-        pass
+        return _identity_from_claims(claims, "nest-rs256")
 
-    claims = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-    return _identity_from_claims(claims, "legacy-local")
+    if alg == "HS256":
+        if JWT_SECRET:
+            try:
+                claims = jwt.decode(
+                    token,
+                    JWT_SECRET,
+                    algorithms=["HS256"],
+                    **decode_opts,
+                )
+                return _identity_from_claims(claims, "nest-hs256")
+            except jwt.InvalidTokenError:
+                pass
+        try:
+            claims = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+            return _identity_from_claims(claims, "legacy-local")
+        except jwt.InvalidTokenError as exc:
+            raise jwt.InvalidTokenError(
+                "Signature verification failed — JWT_SECRET must match school_management_backend"
+            ) from exc
 
+    raise jwt.InvalidTokenError(f"Unsupported JWT algorithm: {alg or 'unknown'}")

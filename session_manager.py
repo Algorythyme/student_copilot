@@ -126,7 +126,7 @@ def load_user_learning_method(user_id: str) -> Optional[str]:
     supabase = get_supabase()
     if supabase:
         try:
-            res = supabase.table('users').select('learning_method').eq('username', user_id).execute()
+            res = supabase.table('users').select('learning_method').eq('user_id', user_id).execute()
             if res.data:
                 return res.data[0].get("learning_method")
         except Exception:
@@ -139,7 +139,7 @@ def save_user_learning_method(user_id: str, method: str):
     supabase = get_supabase()
     if supabase and method:
         try:
-            supabase.table('users').update({'learning_method': method}).eq('username', user_id).execute()
+            supabase.table('users').update({'learning_method': method}).eq('user_id', user_id).execute()
             logger.info(f"[session_manager] Saved global learning method for {user_id} to DB.")
         except Exception as e:
             logger.error(f"[session_manager] Error saving generic learning method for {user_id}: {e}")

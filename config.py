@@ -61,10 +61,18 @@ TAVILY_KEY = os.getenv("TAVILY_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
 
 # ─── DATABASE CONFIGURATION ────────────────────────────────────────────────────
+DATABASE_URL = os.getenv("DATABASE_URL")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 # ─── AUTH & SECURITY ─────────────────────────────────────────────────────────
+AUTH_DISABLED = os.getenv("AUTH_DISABLED", "false").lower() == "true"
+AUTH_DISABLED_USER_ID = os.getenv(
+    "AUTH_DISABLED_USER_ID", "00000000-0000-0000-0000-000000000002"
+)
+AUTH_DISABLED_ROLE = os.getenv("AUTH_DISABLED_ROLE", "STUDENT")
+SMS_SCHOOL_ID: Optional[str] = os.getenv("SMS_SCHOOL_ID")
+
 JWT_SECRET_ENV = os.getenv("JWT_SECRET")
 ENFORCE_STRONG_JWT_SECRET = os.getenv("ENFORCE_STRONG_JWT_SECRET", "true").lower() == "true"
 DEFAULT_JWT_SECRET_MARKERS = {
@@ -74,7 +82,14 @@ DEFAULT_JWT_SECRET_MARKERS = {
 }
 
 if not JWT_SECRET_ENV:
-    if ENFORCE_STRONG_JWT_SECRET:
+    if AUTH_DISABLED:
+        import secrets
+
+        JWT_SECRET = secrets.token_urlsafe(32)
+        logger.warning(
+            "AUTH_DISABLED=true — JWT_SECRET not required for Nest JWT verify bypass."
+        )
+    elif ENFORCE_STRONG_JWT_SECRET:
         logger.error("ERROR: JWT_SECRET not set and ENFORCE_STRONG_JWT_SECRET=true. Refusing to start.")
         sys.exit(1)
     else:
@@ -84,7 +99,7 @@ if not JWT_SECRET_ENV:
 else:
     JWT_SECRET = JWT_SECRET_ENV
 
-if ENFORCE_STRONG_JWT_SECRET:
+if ENFORCE_STRONG_JWT_SECRET and not AUTH_DISABLED:
     secret_lower = (JWT_SECRET_ENV or "").lower()
     if any(marker in secret_lower for marker in DEFAULT_JWT_SECRET_MARKERS):
         logger.error("ERROR: JWT_SECRET appears to be a placeholder/default value and ENFORCE_STRONG_JWT_SECRET=true. Refusing to start.")
@@ -96,7 +111,9 @@ JWT_PUBLIC_KEY = os.getenv("JWT_PUBLIC_KEY")
 JWT_ISSUER = os.getenv("JWT_ISSUER", "Pedagic School Management")
 JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "school-users")
 NEST_JWT_PUBLIC_KEY_URL = os.getenv("NEST_JWT_PUBLIC_KEY_URL")
+NEST_API_URL = os.getenv("NEST_API_URL")
 AUTO_INGEST_SERVICE_TOKEN: Optional[str] = os.getenv("AUTO_INGEST_SERVICE_TOKEN")
+PEDAGIC_PROVISION_SECRET: Optional[str] = os.getenv("PEDAGIC_PROVISION_SECRET")
 
 CORS_ALLOW_ORIGINS_RAW = os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 CORS_ALLOW_ORIGINS = [o.strip() for o in CORS_ALLOW_ORIGINS_RAW.split(",") if o.strip()]
@@ -195,10 +212,32 @@ if not REDIS_URL:
     logger.error("ERROR: REDIS_URL is required for session/memory management.")
     sys.exit(1)
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    logger.warning("WARNING: SUPABASE_URL or SUPABASE_KEY is missing. Database persistence might fail.")
+if not DATABASE_URL:
+    logger.error("ERROR: DATABASE_URL is required (Postgres student_copilot schema).")
+    sys.exit(1)
 
-if not JWT_SECRET_ENV and not ENFORCE_STRONG_JWT_SECRET:
+if DATABASE_URL and ".railway.internal" in DATABASE_URL:
+    logger.warning(
+        "DATABASE_URL uses *.railway.internal — use public *.proxy.rlwy.net when "
+        "student_copilot is in a separate Railway project from Postgres."
+    )
+
+if SUPABASE_URL or SUPABASE_KEY:
+    logger.warning(
+        "SUPABASE_URL/SUPABASE_KEY are legacy — student_copilot uses DATABASE_URL + Postgres."
+    )
+
+if AUTH_DISABLED:
+    logger.warning(
+        "AUTH_DISABLED=true — JWT signatures are not verified. "
+        "Real SMS user id/school are read from Bearer token when sent."
+    )
+
+if not JWT_SECRET_ENV and not ENFORCE_STRONG_JWT_SECRET and not AUTH_DISABLED:
     logger.warning("WARNING: Using dynamically generated random JWT_SECRET. Set JWT_SECRET in .env for production.")
 
-logger.info(f"[startup] Config loaded. LLM={LLM_PROVIDER}, ConvTTL={CONVERSATION_TTL_SECONDS}s")
+logger.info(
+    "[startup] Config loaded. LLM=%s, ConvTTL=%ss, DB=postgres",
+    LLM_PROVIDER,
+    CONVERSATION_TTL_SECONDS,
+)

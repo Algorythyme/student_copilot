@@ -871,11 +871,18 @@ class NotebookQuestionRequest(BaseModel):
     active_class: Optional[str] = None
     active_source: Optional[str] = None
 
-    @field_validator("active_subject", "active_class", "active_source", mode="before")
+    @field_validator("active_subject", "active_class", mode="before")
     @classmethod
-    def sanitize_optional(cls, v):
+    def sanitize_optional_labels(cls, v):
         if v is not None and v.strip():
-            return validate_safe_string(v, "subject/class field")
+            return validate_safe_name(v, "subject/class field")
+        return v
+
+    @field_validator("active_source", mode="before")
+    @classmethod
+    def sanitize_optional_source(cls, v):
+        if v is not None and v.strip():
+            return validate_safe_name(v, "source file")
         return v
 
 SUPPORTED_UPLOAD_SUFFIXES = {".pdf", ".txt", ".md"}
@@ -1112,9 +1119,8 @@ async def notebook_upload(
     class_id: str = Form("General"),
     user_id: str = Depends(get_current_user)
 ):
-    # Sanitize inputs
-    subject = validate_safe_string(subject, "subject")
-    class_id = validate_safe_string(class_id, "class_id")
+    subject = validate_safe_name(subject, "subject")
+    class_id = validate_safe_name(class_id, "class_id")
 
     logger.info(f"[notebook] User {user_id} uploading {file.filename} (Subject: {subject}, Class: {class_id})")
     from config import PINECONE_API_KEY, PINECONE_INDEX_NAME
@@ -1397,9 +1403,8 @@ async def teacher_upload(
     subject: str = Form(...),
     user_id: str = Depends(require_admin)
 ):
-    # Sanitize inputs
-    class_id = validate_safe_string(class_id, "class_id")
-    subject = validate_safe_string(subject, "subject")
+    class_id = validate_safe_name(class_id, "class_id")
+    subject = validate_safe_name(subject, "subject")
 
     logger.info(f"[teacher] Admin {user_id} uploading global context for {class_id} / {subject}")
     from config import PINECONE_API_KEY, PINECONE_INDEX_NAME
@@ -1519,13 +1524,13 @@ class RevisionRequest(BaseModel):
     @field_validator("subject", mode="before")
     @classmethod
     def sanitize_subject(cls, v):
-        return validate_safe_string(v, "subject")
+        return validate_safe_name(v, "subject")
 
     @field_validator("class_id", mode="before")
     @classmethod
     def sanitize_class_id(cls, v):
         if v is not None and v.strip():
-            return validate_safe_string(v, "class_id")
+            return validate_safe_name(v, "class_id")
         return v
 
 
@@ -1538,7 +1543,7 @@ class RevisionSubmission(BaseModel):
     @field_validator("subject", mode="before")
     @classmethod
     def sanitize_subject(cls, v):
-        return validate_safe_string(v, "subject")
+        return validate_safe_name(v, "subject")
 
 
 @app.post("/revision/generate", tags=["Revision Mode"])

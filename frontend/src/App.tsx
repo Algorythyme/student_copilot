@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { TeacherPortal } from './TeacherPortal';
 import { RevisionMode } from './RevisionMode';
 import { AuthScreen } from './AuthScreen';
 import { API_BASE, authHeaders, authHeadersMultipart, checkAuthExpiry } from './config';
+import { logger } from './logger';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
@@ -29,6 +29,17 @@ interface ConversationEntry {
   updated_at?: string;
 }
 
+interface RemoteMessage {
+  role?: string;
+  content?: string;
+}
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
+const log = logger.context('StudentCopilotApp');
+
 /** Returns a human-friendly relative timestamp like "2h ago" or "Mar 12". */
 function formatRelativeTime(iso: string | undefined): string {
   if (!iso) return '';
@@ -52,11 +63,9 @@ function formatRelativeTime(iso: string | undefined): string {
 function App() {
   // Auth
   const [currentUser, setCurrentUser] = useState<string | null>(localStorage.getItem('current_user'));
-  const [currentRole, setCurrentRole] = useState<string | null>(localStorage.getItem('current_role'));
 
   // Navigation
   const [tab, setTab] = useState<'chat' | 'revision'>('chat');
-  const [teacherTab, setTeacherTab] = useState<'upload' | 'materials'>('upload');
 
   // Profile (hidden from default view)
   const [profile, setProfile] = useState<Profile>({ name: '', age: '', country: '', grade: '' });
@@ -110,16 +119,19 @@ function App() {
             grade: data.class_id || '',
             learning_method: data.learning_method || ''
           });
+          log.info('Loaded learner profile', {
+            hasProfile: Boolean(data.full_name || data.class_id),
+          });
         }
       } catch (err) {
-        console.error('Failed to load profile', err);
+        log.error('Failed to load profile', { message: getErrorMessage(err, 'Unknown error') });
       }
     })();
   }, [currentUser]);
 
   // Fetch conversation list
   const fetchConversations = useCallback(async () => {
-    if (!currentUser || currentRole === 'teacher') return;
+    if (!currentUser) return;
     try {
       const headers = await authHeaders(currentUser);
       const res = await fetch(`${API_BASE}/conversations`, { headers });
@@ -127,22 +139,25 @@ function App() {
       if (res.ok) {
         const data = await res.json();
         setConversations(data.conversations || []);
+        log.debug('Loaded conversation history', {
+          count: Array.isArray(data.conversations) ? data.conversations.length : 0,
+        });
       }
     } catch (err) {
-      console.error('Failed to load conversations', err);
+      log.error('Failed to load conversations', { message: getErrorMessage(err, 'Unknown error') });
     }
-  }, [currentUser, currentRole]);
+  }, [currentUser]);
 
   // Load conversations on login and when sidebar opens
   useEffect(() => {
-    if (sidebarOpen && currentUser && currentRole !== 'teacher') {
+    if (sidebarOpen && currentUser) {
       fetchConversations();
     }
-  }, [sidebarOpen, currentUser, currentRole, fetchConversations]);
+  }, [sidebarOpen, currentUser, fetchConversations]);
 
   // Init conversation for chat mode
   useEffect(() => {
-    if (!currentUser || currentRole === 'teacher') return;
+    if (!currentUser) return;
     if (tab !== 'chat' || activeSubject) return; // Only for general chat (no subject = general mode)
     if (convId) return;
     (async () => {
@@ -154,11 +169,12 @@ function App() {
         checkAuthExpiry(res);
         const data = await res.json();
         setConvId(data.conversation_id);
+        log.info('Created conversation', { hasConversation: Boolean(data.conversation_id) });
       } catch (err) {
-        console.error('Failed to create conversation', err);
+        log.error('Failed to create conversation', { message: getErrorMessage(err, 'Unknown error') });
       }
     })();
-  }, [tab, currentUser, activeSubject]);
+  }, [tab, currentUser, activeSubject, convId]);
 
   // Silent learning sync — end previous conversation in background
   const syncLearningProfile = async (convIdToEnd: string) => {
@@ -174,7 +190,9 @@ function App() {
           setProfile(prev => ({ ...prev, learning_method: data.learning_method }));
         }
       }
-    } catch {} // Silent — never block the user
+    } catch {
+      return; // Silent: never block the user.
+    }
   };
 
   // Sync on tab close / navigate away
@@ -233,17 +251,19 @@ function App() {
       }
 
       const data = await res.json();
-      const loadedMessages: Message[] = (data.messages || []).map((m: any) => ({
+      const loadedMessages: Message[] = (data.messages || []).map((m: RemoteMessage) => ({
         role: m.role as 'user' | 'assistant',
-        content: m.content,
+        content: m.content || '',
       }));
 
       setMessages(loadedMessages);
       setConvId(targetConvId);
       setActiveSubject('');
       setSidebarOpen(false);
-    } catch (err: any) {
-      setToast({ message: `Failed to load chat: ${err.message}`, type: 'error' });
+      log.info('Resumed conversation', { messageCount: loadedMessages.length });
+    } catch (err: unknown) {
+      log.error('Failed to resume conversation', { message: getErrorMessage(err, 'Unknown error') });
+      setToast({ message: `Failed to load chat: ${getErrorMessage(err, 'Unknown error')}`, type: 'error' });
     } finally {
       setLoadingHistory(false);
       setResumingConvId(null);
@@ -285,8 +305,10 @@ function App() {
       }
       const data = await res.json();
       setMessages(prev => [...prev, { role: 'assistant', content: data.reply || data.answer }]);
-    } catch (err: any) {
-      setMessages(prev => [...prev, { role: 'assistant', content: `Something went wrong: ${err.message}` }]);
+      log.debug('Chat response received', { isNotebook });
+    } catch (err: unknown) {
+      log.error('Chat request failed', { isNotebook, message: getErrorMessage(err, 'Unknown error') });
+      setMessages(prev => [...prev, { role: 'assistant', content: `Something went wrong: ${getErrorMessage(err, 'Unknown error')}` }]);
     } finally {
       setLoading(false);
     }
@@ -316,11 +338,14 @@ function App() {
       checkAuthExpiry(res);
       const data = await res.json();
       if (isNotebook && data.chunks) {
+        log.info('Notebook upload processed', { chunks: Number(data.chunks) || 0 });
         setToast({ message: `${selectedFile.name} processed — ${data.chunks} study sections created.`, type: 'success' });
       } else if (data.summary) {
+        log.info('Chat upload processed', { hasSummary: true });
         setToast({ message: `File uploaded successfully.`, type: 'success' });
       }
     } catch (err) {
+      log.error('Upload failed', { isNotebook, message: getErrorMessage(err, 'Unknown error') });
       setToast({ message: 'Upload failed. Please try again.', type: 'error' });
     } finally {
       setUploading(false);
@@ -332,43 +357,19 @@ function App() {
     // Sync before logout
     if (convId) syncLearningProfile(convId);
     localStorage.removeItem('current_user');
-    localStorage.removeItem('current_role');
     if (currentUser) localStorage.removeItem(`jwt_${currentUser}`);
     setCurrentUser(null);
-    setCurrentRole(null);
     setConvId(null);
     setMessages([]);
     setProfile({ name: '', age: '', country: '', grade: '' });
     setConversations([]);
     setSidebarOpen(false);
+    log.info('User logged out');
   };
 
   // ─── Auth Gate ───────────────────────────────────────────
   if (!currentUser) {
-    return <AuthScreen onLogin={(u, r) => { setCurrentUser(u); setCurrentRole(r); }} />;
-  }
-
-  // ─── Teacher Layout ──────────────────────────────────────
-  if (currentRole === 'teacher') {
-    return (
-      <>
-        <nav className="top-nav">
-          <span className="nav-brand">Student Copilot</span>
-          <div className="nav-tabs">
-            <button className={`nav-tab ${teacherTab === 'upload' ? 'active' : ''}`} onClick={() => setTeacherTab('upload')}>Upload</button>
-            <button className={`nav-tab ${teacherTab === 'materials' ? 'active' : ''}`} onClick={() => setTeacherTab('materials')}>Materials</button>
-          </div>
-          <div className="nav-actions">
-            <button className="nav-icon-btn" onClick={() => setSettingsOpen(true)} title="Settings">⚙</button>
-            <button className="btn-danger" onClick={handleLogout}>Logout</button>
-          </div>
-        </nav>
-        <div className="content-area">
-          <TeacherPortal userId={currentUser} activeTab={teacherTab} />
-        </div>
-        {settingsOpen && <SettingsModal profile={profile} onClose={() => setSettingsOpen(false)} />}
-      </>
-    );
+    return <AuthScreen onLogin={setCurrentUser} />;
   }
 
   // ─── Student Layout ──────────────────────────────────────

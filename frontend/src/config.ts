@@ -37,7 +37,6 @@ export function checkAuthExpiry(res: Response): void {
         const currentUser = localStorage.getItem('current_user');
         if (currentUser) localStorage.removeItem(`jwt_${currentUser}`);
         localStorage.removeItem('current_user');
-        localStorage.removeItem('current_role');
         window.location.reload();
     }
 }

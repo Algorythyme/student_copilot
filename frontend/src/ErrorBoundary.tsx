@@ -1,4 +1,5 @@
 import React from 'react';
+import { logger } from './logger';
 
 interface ErrorBoundaryState {
     hasError: boolean;
@@ -23,7 +24,10 @@ export class ErrorBoundary extends React.Component<
     }
 
     componentDidCatch(error: Error, info: React.ErrorInfo) {
-        console.error('[ErrorBoundary] Caught render error:', error, info);
+        logger.context('ErrorBoundary').error('Caught render error', {
+            message: error.message,
+            componentStack: info.componentStack,
+        });
     }
 
     render() {

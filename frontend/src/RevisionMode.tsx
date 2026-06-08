@@ -6,6 +6,10 @@ import remarkGfm from 'remark-gfm';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 
+function getErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
 interface Question {
   id: string;
   type: 'mcq' | 'theory';
@@ -63,12 +67,12 @@ export const RevisionMode: React.FC<RevisionModeProps> = ({ userId }) => {
       }
       const data = await res.json();
       const qs = data.questions || [];
-      if (qs.length === 0) throw new Error('No questions generated. Ask your teacher to upload materials first.');
+      if (qs.length === 0) throw new Error('No questions generated from the available school materials.');
       setQuestions(qs);
       setAnswers({});
       setStep('exam');
-    } catch (err: any) {
-      setError(err.message || 'Failed to generate exam.');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Failed to generate exam.'));
     } finally {
       setLoading(false);
     }
@@ -95,8 +99,8 @@ export const RevisionMode: React.FC<RevisionModeProps> = ({ userId }) => {
       const data = await res.json();
       setFeedback(data.feedback);
       setStep('result');
-    } catch (err: any) {
-      setError(err.message || 'Grading failed.');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Grading failed.'));
     } finally {
       setLoading(false);
     }
@@ -108,7 +112,7 @@ export const RevisionMode: React.FC<RevisionModeProps> = ({ userId }) => {
         <div className="revision-header">
           <h2>Revision & Practice</h2>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem' }}>
-            Generate a personalized exam from your teacher's materials.
+            Generate a personalized exam from your school materials.
           </p>
         </div>
         {error && <div className="field-error" style={{ maxWidth: 600, margin: '0 auto 1rem' }}>{error}</div>}

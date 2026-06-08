@@ -62,8 +62,6 @@ REDIS_URL = os.getenv("REDIS_URL")
 
 # ─── DATABASE CONFIGURATION ────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 # ─── AUTH & SECURITY ─────────────────────────────────────────────────────────
 AUTH_DISABLED = os.getenv("AUTH_DISABLED", "false").lower() == "true"
@@ -220,11 +218,6 @@ if DATABASE_URL and ".railway.internal" in DATABASE_URL:
     logger.warning(
         "DATABASE_URL uses *.railway.internal — use public *.proxy.rlwy.net when "
         "student_copilot is in a separate Railway project from Postgres."
-    )
-
-if SUPABASE_URL or SUPABASE_KEY:
-    logger.warning(
-        "SUPABASE_URL/SUPABASE_KEY are legacy — student_copilot uses DATABASE_URL + Postgres."
     )
 
 if AUTH_DISABLED:

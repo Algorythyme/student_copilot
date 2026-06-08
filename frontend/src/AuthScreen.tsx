@@ -1,13 +1,16 @@
 import React, { useState } from 'react';
 import { API_BASE } from './config';
 
+function getErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
 interface AuthProps {
-  onLogin: (userId: string, role: string) => void;
+  onLogin: (userId: string) => void;
 }
 
 export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
   const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [role, setRole] = useState<'student' | 'teacher'>('student');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -38,14 +41,13 @@ export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
         const data = await res.json();
         localStorage.setItem(`jwt_${data.user_id}`, data.access_token);
         localStorage.setItem('current_user', data.user_id);
-        localStorage.setItem('current_role', data.role);
-        onLogin(data.user_id, data.role);
+        onLogin(data.user_id);
       } else {
         const res = await fetch(`${API_BASE}/auth/register`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            username, password, role,
+            username, password, role: 'student',
             full_name: fullName,
             age: age ? parseInt(age) : null,
             country, class_id: classId, subjects
@@ -58,11 +60,10 @@ export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
         const data = await res.json();
         localStorage.setItem(`jwt_${data.user_id}`, data.access_token);
         localStorage.setItem('current_user', data.user_id);
-        localStorage.setItem('current_role', data.role);
-        onLogin(data.user_id, data.role);
+        onLogin(data.user_id);
       }
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Authentication failed'));
     } finally {
       setLoading(false);
     }
@@ -82,17 +83,6 @@ export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
             Create Account
           </button>
         </div>
-
-        {mode === 'register' && (
-          <div className="role-toggle">
-            <button className={`role-btn ${role === 'student' ? 'active' : ''}`} onClick={() => setRole('student')} type="button">
-              Student
-            </button>
-            <button className={`role-btn ${role === 'teacher' ? 'active' : ''}`} onClick={() => setRole('teacher')} type="button">
-              Teacher
-            </button>
-          </div>
-        )}
 
         <form onSubmit={handleSubmit}>
           <div className="field">
@@ -120,18 +110,14 @@ export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
                   <input type="text" value={country} onChange={e => setCountry(e.target.value)} placeholder="Nigeria" />
                 </div>
               </div>
-              {role === 'student' && (
-                <>
-                  <div className="field">
-                    <label>Class ID</label>
-                    <input type="text" value={classId} onChange={e => setClassId(e.target.value)} placeholder="e.g. SSS 1" />
-                  </div>
-                  <div className="field">
-                    <label>Subjects <span className="optional">(comma separated)</span></label>
-                    <input type="text" value={subjects} onChange={e => setSubjects(e.target.value)} placeholder="Biology, Math, Physics" />
-                  </div>
-                </>
-              )}
+              <div className="field">
+                <label>Class ID</label>
+                <input type="text" value={classId} onChange={e => setClassId(e.target.value)} placeholder="e.g. SSS 1" />
+              </div>
+              <div className="field">
+                <label>Subjects <span className="optional">(comma separated)</span></label>
+                <input type="text" value={subjects} onChange={e => setSubjects(e.target.value)} placeholder="Biology, Math, Physics" />
+              </div>
             </>
           )}
 

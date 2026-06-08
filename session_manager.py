@@ -57,17 +57,17 @@ def _get_title_key(conversation_id: str) -> str:
 
 # --- Database Data Load/Save Functions ---
 def load_conversation_data_from_db(conversation_id: str) -> Dict[str, Any]:
-    """Loads user profile and summaries for a specific conversation from Supabase (or cached Redis)."""
-    from database import get_supabase
+    """Loads user profile and summaries for a specific conversation from db_store (or cached Redis)."""
+    from database import get_db_store
     
     profile = {}
     summaries = []
     title = "Untitled Chat"
 
-    supabase = get_supabase()
-    if supabase:
+    db_store = get_db_store()
+    if db_store:
         try:
-            res = supabase.table('conversations').select('*').eq('id', conversation_id).execute()
+            res = db_store.table('conversations').select('*').eq('id', conversation_id).execute()
             if res.data:
                 conv = res.data[0]
                 profile = conv.get("profile_override", {}) or {}
@@ -75,9 +75,9 @@ def load_conversation_data_from_db(conversation_id: str) -> Dict[str, Any]:
                 title = conv.get("title", "Untitled Chat") or "Untitled Chat"
                 return {"profile": profile, "summaries": summaries, "title": title}
         except Exception as e:
-            logger.error(f"[session_manager] Supabase load error for {conversation_id}: {e}")
+            logger.error(f"[session_manager] db_store load error for {conversation_id}: {e}")
 
-    # Fallback to Redis if Supabase is offline or conv is legacy
+    # Fallback to Redis if db_store is offline or conv is legacy
     if redis_client:
         try:
             profile_json = redis_client.get(_get_profile_key(conversation_id))
@@ -92,21 +92,21 @@ def load_conversation_data_from_db(conversation_id: str) -> Dict[str, Any]:
     return {"profile": profile, "summaries": summaries, "title": title}
 
 def save_conversation_data_to_db(conversation_id: str, profile: Dict[str, Any], summaries: List[Dict[str, Any]], title: str):
-    """Saves user profile and summaries for a specific conversation to Supabase (and cache)."""
-    from database import get_supabase
+    """Saves user profile and summaries for a specific conversation to db_store (and cache)."""
+    from database import get_db_store
     import datetime
-    supabase = get_supabase()
+    db_store = get_db_store()
 
-    if supabase:
+    if db_store:
         try:
-            supabase.table('conversations').update({
+            db_store.table('conversations').update({
                 "profile_override": profile,
                 "summaries": summaries,
                 "title": title,
                 "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
             }).eq('id', conversation_id).execute()
         except Exception as e:
-            logger.error(f"[session_manager] Supabase save error for {conversation_id}: {e}")
+            logger.error(f"[session_manager] db_store save error for {conversation_id}: {e}")
 
     # Mirror to Redis cache for active fast reloads
     if redis_client:
@@ -121,12 +121,12 @@ def save_conversation_data_to_db(conversation_id: str, profile: Dict[str, Any], 
 
 # --- User Global Data ---
 def load_user_learning_method(user_id: str) -> Optional[str]:
-    """Loads a user's globally shared learning method from Supabase."""
-    from database import get_supabase
-    supabase = get_supabase()
-    if supabase:
+    """Loads a user's globally shared learning method from db_store."""
+    from database import get_db_store
+    db_store = get_db_store()
+    if db_store:
         try:
-            res = supabase.table('users').select('learning_method').eq('user_id', user_id).execute()
+            res = db_store.table('users').select('learning_method').eq('user_id', user_id).execute()
             if res.data:
                 return res.data[0].get("learning_method")
         except Exception:
@@ -134,12 +134,12 @@ def load_user_learning_method(user_id: str) -> Optional[str]:
     return None
 
 def save_user_learning_method(user_id: str, method: str):
-    """Saves a user's globally shared learning method to Supabase."""
-    from database import get_supabase
-    supabase = get_supabase()
-    if supabase and method:
+    """Saves a user's globally shared learning method to db_store."""
+    from database import get_db_store
+    db_store = get_db_store()
+    if db_store and method:
         try:
-            supabase.table('users').update({'learning_method': method}).eq('user_id', user_id).execute()
+            db_store.table('users').update({'learning_method': method}).eq('user_id', user_id).execute()
             logger.info(f"[session_manager] Saved global learning method for {user_id} to DB.")
         except Exception as e:
             logger.error(f"[session_manager] Error saving generic learning method for {user_id}: {e}")
@@ -147,15 +147,15 @@ def save_user_learning_method(user_id: str, method: str):
 
 # --- Conversation Management ---
 def create_new_conversation_id(user_id: str, initial_title: str = "Untitled Chat") -> str:
-    """Generates a new conversation ID and associates it with the user in Supabase."""
-    from database import get_supabase
-    supabase = get_supabase()
-    if not supabase:
+    """Generates a new conversation ID and associates it with the user in db_store."""
+    from database import get_db_store
+    db_store = get_db_store()
+    if not db_store:
         raise RuntimeError("Database persistence not configured.")
 
     conversation_id = str(uuid.uuid4())
     try:
-        supabase.table('conversations').insert({
+        db_store.table('conversations').insert({
             "id": conversation_id,
             "user_id": user_id,
             "title": initial_title,
@@ -174,14 +174,14 @@ def create_new_conversation_id(user_id: str, initial_title: str = "Untitled Chat
         raise RuntimeError(f"Failed to create new conversation: {e}")
 
 def get_user_conversation_ids(user_id: str) -> List[Dict[str, str]]:
-    """Retrieves all conversation IDs, titles, and timestamps for a given user from Supabase."""
-    from database import get_supabase
-    supabase = get_supabase()
-    if not supabase:
+    """Retrieves all conversation IDs, titles, and timestamps for a given user from db_store."""
+    from database import get_db_store
+    db_store = get_db_store()
+    if not db_store:
         return []
 
     try:
-        res = supabase.table('conversations').select('id, title, updated_at').eq('user_id', user_id).order('updated_at', desc=True).execute()
+        res = db_store.table('conversations').select('id, title, updated_at').eq('user_id', user_id).order('updated_at', desc=True).execute()
         if res.data:
             return [
                 {
@@ -218,19 +218,19 @@ def get_conversation_history(user_id: str, conversation_id: str) -> Optional[Red
     try:
         is_member = redis_client.sismember(_get_user_conversations_key(user_id), conversation_id)
         if not is_member:
-            # BUG-03 fix: Fallback to Supabase when Redis set is lost (flush/restart)
-            from database import get_supabase
-            supabase = get_supabase()
-            if supabase:
+            # BUG-03 fix: Fallback to db_store when Redis set is lost (flush/restart)
+            from database import get_db_store
+            db_store = get_db_store()
+            if db_store:
                 try:
-                    res = supabase.table('conversations').select('id').eq('id', conversation_id).eq('user_id', user_id).execute()
+                    res = db_store.table('conversations').select('id').eq('id', conversation_id).eq('user_id', user_id).execute()
                     if res.data:
                         # Re-sync ownership to Redis for future fast lookups
                         redis_client.sadd(_get_user_conversations_key(user_id), conversation_id)
-                        logger.info(f"[session] Re-synced ownership for {conversation_id} -> {user_id} from Supabase.")
+                        logger.info(f"[session] Re-synced ownership for {conversation_id} -> {user_id} from db_store.")
                         is_member = True
                 except Exception as db_err:
-                    logger.error(f"[session] Supabase ownership fallback failed: {db_err}")
+                    logger.error(f"[session] db_store ownership fallback failed: {db_err}")
             if not is_member:
                 logger.warning(f"[session] Conversation {conversation_id} not found for user {user_id}.")
                 return None

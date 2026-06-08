@@ -351,7 +351,7 @@ async def pedagic_provision_user(request: Request, req: PedagicProvisionRequest)
     Requires header X-Pedagic-Provision-Key matching PEDAGIC_PROVISION_SECRET.
     """
     import hashlib
-    from database import get_supabase
+    from database import get_db_store
     from llm_setup import redis_client as r
 
     if not PEDAGIC_PROVISION_SECRET:
@@ -364,8 +364,8 @@ async def pedagic_provision_user(request: Request, req: PedagicProvisionRequest)
     if not provided or not hmac.compare_digest(provided, PEDAGIC_PROVISION_SECRET):
         raise HTTPException(status_code=403, detail="Invalid provision key.")
 
-    supabase = get_supabase()
-    if not supabase:
+    db_store = get_db_store()
+    if not db_store:
         raise HTTPException(
             status_code=503,
             detail=(
@@ -388,7 +388,7 @@ async def pedagic_provision_user(request: Request, req: PedagicProvisionRequest)
     }
 
     existing = (
-        supabase.table("users")
+        db_store.table("users")
         .select("user_id")
         .eq("user_id", req.username)
         .execute()
@@ -396,7 +396,7 @@ async def pedagic_provision_user(request: Request, req: PedagicProvisionRequest)
 
     try:
         if existing.data:
-            supabase.table("users").update(
+            db_store.table("users").update(
                 {
                     "password_hash": stored_hash,
                     "full_name": req.full_name,
@@ -407,7 +407,7 @@ async def pedagic_provision_user(request: Request, req: PedagicProvisionRequest)
             ).eq("user_id", req.username).execute()
             logger.info(f"[auth] Pedagic provision updated: {req.username}")
         else:
-            supabase.table("users").insert(profile_data).execute()
+            db_store.table("users").insert(profile_data).execute()
             logger.info(f"[auth] Pedagic provision created: {req.username}")
     except Exception as e:
         logger.error(f"[auth] Pedagic provision error: {e}")
@@ -432,14 +432,14 @@ async def pedagic_provision_user(request: Request, req: PedagicProvisionRequest)
 @app.post("/auth/register", tags=["Authentication"])
 @limiter.limit(RATE_LIMIT_AUTH)
 async def register_user(request: Request, req: UserRegistration):
-    """Registers a new user, saving their profile securely to Supabase and cache."""
+    """Registers a new user, saving their profile securely to db_store and cache."""
     from llm_setup import redis_client as r
-    from database import get_supabase
+    from database import get_db_store
     import hashlib
     import secrets
 
-    supabase = get_supabase()
-    if not supabase:
+    db_store = get_db_store()
+    if not db_store:
         raise HTTPException(
             status_code=503,
             detail=(
@@ -448,8 +448,8 @@ async def register_user(request: Request, req: UserRegistration):
             ),
         )
 
-    # Check if user exists in Supabase
-    existing_user = supabase.table('users').select('user_id').eq('user_id', req.username).execute()
+    # Check if user exists in db_store
+    existing_user = db_store.table('users').select('user_id').eq('user_id', req.username).execute()
     if existing_user.data:
         raise HTTPException(status_code=400, detail="Username already exists.")
 
@@ -473,9 +473,9 @@ async def register_user(request: Request, req: UserRegistration):
     }
     
     try:
-        supabase.table('users').insert(profile_data).execute()
+        db_store.table('users').insert(profile_data).execute()
     except Exception as e:
-        logger.error(f"[auth] Supabase registration error: {e}")
+        logger.error(f"[auth] db_store registration error: {e}")
         raise HTTPException(status_code=500, detail="Failed to register user to database.")
     
     # Save a cached version as strings for fast fallback
@@ -499,13 +499,13 @@ async def register_user(request: Request, req: UserRegistration):
 @limiter.limit(RATE_LIMIT_AUTH)
 async def login_for_token(request: Request, req: TokenRequest):
     """Authenticates a user and issues a JWT."""
-    from database import get_supabase
+    from database import get_db_store
     import hashlib
 
     validate_safe_string(req.username, "username")
     
-    supabase = get_supabase()
-    if not supabase:
+    db_store = get_db_store()
+    if not db_store:
         raise HTTPException(
             status_code=503,
             detail=(
@@ -514,7 +514,7 @@ async def login_for_token(request: Request, req: TokenRequest):
             ),
         )
         
-    res = supabase.table('users').select('*').eq('user_id', req.username).execute()
+    res = db_store.table('users').select('*').eq('user_id', req.username).execute()
     if not res.data:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
     
@@ -557,10 +557,10 @@ async def get_my_profile(
     user_id: str = Depends(get_current_user),
 ):
     """Returns the current user's profile (Nest JWT or legacy local account)."""
-    from database import get_supabase
+    from database import get_db_store
     
-    supabase = get_supabase()
-    if not supabase:
+    db_store = get_db_store()
+    if not db_store:
         raise HTTPException(
             status_code=503,
             detail=(
@@ -585,7 +585,7 @@ async def get_my_profile(
             "learning_method": load_user_learning_method(user_id) or "",
         }
 
-    res = supabase.table('users').select('*').eq('user_id', user_id).execute()
+    res = db_store.table('users').select('*').eq('user_id', user_id).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="User profile not found.")
         
@@ -959,12 +959,12 @@ def _ingest_to_pinecone(
     parent_chunk_size: int = 2000,
     redis_ttl: Optional[int] = None,
 ) -> int:
-    """Shared ingestion: extract text → parent/child chunk → store parents in Redis+Supabase → vectorize children in Pinecone.
+    """Shared ingestion: extract text → parent/child chunk → store parents in Redis+db_store → vectorize children in Pinecone.
     Returns the total number of child chunks ingested."""
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from llm_setup import redis_client as r, embeddings as _emb
     from config import PINECONE_INDEX_NAME
-    from database import get_supabase
+    from database import get_db_store
 
     if suffix == ".pdf":
         import pymupdf4llm
@@ -985,15 +985,15 @@ def _ingest_to_pinecone(
 
     for p_chunk in parent_chunks:
         parent_id = f"parent_{uuid.uuid4().hex}"
-        # Write-through: Redis (hot cache) + Supabase (permanent)
+        # Write-through: Redis (hot cache) + db_store (permanent)
         r.hset(parent_id, "content", p_chunk)
         if redis_ttl and redis_ttl > 0:
             r.expire(parent_id, redis_ttl)
 
-        supabase = get_supabase()
-        if supabase:
+        db_store = get_db_store()
+        if db_store:
             try:
-                supabase.table('parent_chunks').upsert({
+                db_store.table('parent_chunks').upsert({
                     "id": parent_id,
                     "content": p_chunk,
                     "owner_id": metadata_base.get("owner_id", ""),
@@ -1001,7 +1001,7 @@ def _ingest_to_pinecone(
                     "role": metadata_base.get("role", "student"),
                 }).execute()
             except Exception as e:
-                logger.error(f"[ingest] Supabase parent chunk write failed for {parent_id}: {e}")
+                logger.error(f"[ingest] db_store parent chunk write failed for {parent_id}: {e}")
 
         children = child_splitter.split_text(p_chunk)
         all_child_chunks.extend(children)
@@ -1040,7 +1040,7 @@ def _ingest_text_to_pinecone(
     from langchain_pinecone import PineconeVectorStore
     from llm_setup import redis_client as r, embeddings as _emb
     from config import PINECONE_INDEX_NAME
-    from database import get_supabase
+    from database import get_db_store
 
     cleaned_text = (text or "").strip()
     if not cleaned_text:
@@ -1065,10 +1065,10 @@ def _ingest_text_to_pinecone(
         if redis_ttl and redis_ttl > 0:
             r.expire(parent_id, redis_ttl)
 
-        supabase = get_supabase()
-        if supabase:
+        db_store = get_db_store()
+        if db_store:
             try:
-                supabase.table("parent_chunks").upsert({
+                db_store.table("parent_chunks").upsert({
                     "id": parent_id,
                     "content": p_chunk,
                     "owner_id": metadata_base.get("owner_id", ""),
@@ -1076,7 +1076,7 @@ def _ingest_text_to_pinecone(
                     "role": "teacher",
                 }).execute()
             except Exception as e:
-                logger.error(f"[auto-ingest] Supabase parent chunk write failed for {parent_id}: {e}")
+                logger.error(f"[auto-ingest] db_store parent chunk write failed for {parent_id}: {e}")
 
         children = child_splitter.split_text(p_chunk)
         for child_idx, child in enumerate(children):
@@ -1221,12 +1221,12 @@ async def notebook_ask(
             if p_content:
                 parent_texts.append(p_content.decode(errors="ignore"))
             else:
-                # Cache miss — read-through from Supabase and repopulate Redis
-                from database import get_supabase
-                supabase = get_supabase()
-                if supabase:
+                # Cache miss — read-through from db_store and repopulate Redis
+                from database import get_db_store
+                db_store = get_db_store()
+                if db_store:
                     try:
-                        res = supabase.table('parent_chunks').select('content').eq('id', pid).execute()
+                        res = db_store.table('parent_chunks').select('content').eq('id', pid).execute()
                         if res.data:
                             content = res.data[0]["content"]
                             parent_texts.append(content)
@@ -1394,59 +1394,6 @@ async def teacher_auto_ingest(
         logger.error(f"[auto-ingest] Failed for {req.source_service}/{req.source_type}/{req.source_id}: {e}")
         raise HTTPException(status_code=500, detail="Auto-ingest processing failed.")
 
-@app.post("/teacher/upload", tags=["Teacher Administrative"])
-@limiter.limit(RATE_LIMIT_UPLOAD)
-async def teacher_upload(
-    request: Request,
-    file: UploadFile = File(...),
-    class_id: str = Form(...),
-    subject: str = Form(...),
-    user_id: str = Depends(require_admin)
-):
-    class_id = validate_safe_name(class_id, "class_id")
-    subject = validate_safe_name(subject, "subject")
-
-    logger.info(f"[teacher] Admin {user_id} uploading global context for {class_id} / {subject}")
-    from config import PINECONE_API_KEY, PINECONE_INDEX_NAME
-    from llm_setup import embeddings
-
-    if not PINECONE_API_KEY or not embeddings:
-        raise HTTPException(status_code=500, detail="Pinecone not configured.")
-
-    suffix = os.path.splitext(file.filename)[1].lower() if file.filename else ".dat"
-
-    if suffix not in SUPPORTED_UPLOAD_SUFFIXES:
-        raise HTTPException(status_code=415, detail=f"Unsupported file type '{suffix}'. Supported: {SUPPORTED_UPLOAD_SUFFIXES}")
-
-    try:
-        tmp_path = await _stream_to_tempfile_bounded(file, suffix)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read upload: {e}")
-
-    try:
-        teacher_ttl = TEACHER_CONTENT_TTL_SECONDS if TEACHER_CONTENT_TTL_SECONDS > 0 else None
-        chunk_count = _ingest_to_pinecone(
-            tmp_path=tmp_path,
-            suffix=suffix,
-            filename=file.filename,
-            metadata_base={"role": "teacher", "class_id": class_id, "subject": subject},
-            parent_chunk_size=2500,
-            redis_ttl=teacher_ttl,
-        )
-        return {"status": "Global context ingested", "class": class_id, "subject": subject, "chunks": chunk_count}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[teacher] Upload failed: {e}")
-        raise HTTPException(status_code=500, detail="Teacher upload processing failed.")
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-
-
-
-
-
 # =============================================================================
 # REVISION & ASSESSMENT MODULE
 # =============================================================================
@@ -1602,11 +1549,11 @@ async def generate_exam(
             if p_content:
                 parent_texts.append(p_content.decode(errors="ignore"))
             else:
-                from database import get_supabase
-                supabase = get_supabase()
-                if supabase:
+                from database import get_db_store
+                db_store = get_db_store()
+                if db_store:
                     try:
-                        res = supabase.table('parent_chunks').select('content').eq('id', pid).execute()
+                        res = db_store.table('parent_chunks').select('content').eq('id', pid).execute()
                         if res.data:
                             content = res.data[0]["content"]
                             parent_texts.append(content)
@@ -1682,11 +1629,11 @@ async def evaluate_exam(
             if p_content:
                 parent_texts.append(p_content.decode(errors="ignore"))
             else:
-                from database import get_supabase
-                supabase = get_supabase()
-                if supabase:
+                from database import get_db_store
+                db_store = get_db_store()
+                if db_store:
                     try:
-                        res = supabase.table('parent_chunks').select('content').eq('id', pid).execute()
+                        res = db_store.table('parent_chunks').select('content').eq('id', pid).execute()
                         if res.data:
                             content = res.data[0]["content"]
                             parent_texts.append(content)

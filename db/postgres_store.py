@@ -1,4 +1,4 @@
-"""PostgREST-style client for student_copilot tables (Supabase API compatibility)."""
+"""PostgREST-style client for student_copilot tables (db_store API compatibility)."""
 
 from __future__ import annotations
 

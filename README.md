@@ -1,4 +1,6 @@
-# ≡ƒ¢í∩╕Å student_copilot ΓÇö The Sovereign AI Tutor
+# student_copilot — The Sovereign AI Tutor
+
+> **SMS integrated mode:** Deploy with `DEPLOY_MODE=compute`, `SERVE_WEB=false`, `REQUIRE_DATABASE=false`. See [Deploy student copilot compute](../docs/DEPLOY-STUDENT-COPILOT-COMPUTE.md) · [SMS integration](./docs/sms-integration.md) · [Deployment](./docs/DEPLOYMENT.md)
 
 **"Engineering is applied philosophy."**
 

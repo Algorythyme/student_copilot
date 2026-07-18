@@ -4,6 +4,7 @@ from config import (
     GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_INDEX_NAME, PINECONE_CLOUD, PINECONE_REGION,
     GEMINI_MODEL_NAME, GEMINI_EMBEDDING_MODEL, LLM_TEMPERATURE,
     DEEPSEEK_API_KEY, DEEPSEEK_MODEL_NAME, DEEPSEEK_BASE_URL,
+    IS_COMPUTE_MODE,
 )
 import sys
 import time
@@ -107,6 +108,9 @@ except Exception as e:
     sys.exit(1)
 
 def _ensure_pinecone_index() -> None:
+    if IS_COMPUTE_MODE:
+        logger.info("[startup] Skipping Pinecone init in compute mode.")
+        return
     if not PINECONE_API_KEY:
         return
 
@@ -166,11 +170,17 @@ try:
         redis_client.ping() # Test connection
         from config import redact_for_logs
         logger.info(f"[startup] Redis client initialized successfully (url_hash={redact_for_logs(REDIS_URL)})")
+    elif IS_COMPUTE_MODE:
+        logger.warning("[startup] REDIS_URL not set — Redis client disabled (compute mode).")
     else:
-        logger.error("ERROR: REDIS_URL is not set. Cannot initialize Redis client.") # Changed from print
+        logger.error("ERROR: REDIS_URL is not set. Cannot initialize Redis client.")
         sys.exit(1)
 except Exception as e:
-    logger.error(f"[startup] Failed to initialize Redis client: {e}")
-    sys.exit(1)
+    if IS_COMPUTE_MODE:
+        logger.warning(f"[startup] Redis unavailable in compute mode (continuing): {e}")
+        redis_client = None
+    else:
+        logger.error(f"[startup] Failed to initialize Redis client: {e}")
+        sys.exit(1)
 
 _ensure_pinecone_index()

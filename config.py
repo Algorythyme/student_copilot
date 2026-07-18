@@ -63,6 +63,55 @@ REDIS_URL = os.getenv("REDIS_URL")
 # ─── DATABASE CONFIGURATION ────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# ─── DEPLOY MODE ───────────────────────────────────────────────────────────────
+DEPLOY_MODE = os.getenv("DEPLOY_MODE", "full").lower()
+_VALID_DEPLOY_MODES = {"compute", "web", "full"}
+if DEPLOY_MODE not in _VALID_DEPLOY_MODES:
+    logger.error(
+        "ERROR: DEPLOY_MODE must be one of compute, web, full (got %r).",
+        DEPLOY_MODE,
+    )
+    sys.exit(1)
+
+IS_COMPUTE_MODE = DEPLOY_MODE == "compute"
+IS_WEB_MODE = DEPLOY_MODE == "web"
+IS_FULL_MODE = DEPLOY_MODE == "full"
+LEGACY_ROUTES_ENABLED = DEPLOY_MODE in ("web", "full")
+COMPUTE_ROUTES_ENABLED = DEPLOY_MODE in ("compute", "full")
+
+def _env_bool(name: str, default: str) -> bool:
+    return os.getenv(name, default).lower() == "true"
+
+SERVE_WEB = _env_bool(
+    "SERVE_WEB",
+    "true" if DEPLOY_MODE in ("web", "full") else "false",
+)
+ENABLE_NEST_AUTH = _env_bool(
+    "ENABLE_NEST_AUTH",
+    "true" if DEPLOY_MODE in ("compute", "full") else "false",
+)
+ENABLE_SUPABASE_AUTH = _env_bool(
+    "ENABLE_SUPABASE_AUTH",
+    "true" if DEPLOY_MODE in ("web", "full") else "false",
+)
+ENABLE_STANDALONE_AUTH = _env_bool(
+    "ENABLE_STANDALONE_AUTH",
+    "true" if DEPLOY_MODE in ("web", "full") else "false",
+)
+
+REQUIRE_DATABASE = _env_bool(
+    "REQUIRE_DATABASE",
+    "true" if DEPLOY_MODE in ("web", "full") else "false",
+)
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+
+if ENABLE_SUPABASE_AUTH and not SUPABASE_JWT_SECRET and DEPLOY_MODE in ("web", "full"):
+    logger.warning(
+        "WARNING: ENABLE_SUPABASE_AUTH=true but SUPABASE_JWT_SECRET is not set."
+    )
+
 # ─── AUTH & SECURITY ─────────────────────────────────────────────────────────
 AUTH_DISABLED = os.getenv("AUTH_DISABLED", "false").lower() == "true"
 AUTH_DISABLED_USER_ID = os.getenv(
@@ -86,6 +135,13 @@ if not JWT_SECRET_ENV:
         JWT_SECRET = secrets.token_urlsafe(32)
         logger.warning(
             "AUTH_DISABLED=true — JWT_SECRET not required for Nest JWT verify bypass."
+        )
+    elif IS_COMPUTE_MODE and ENABLE_NEST_AUTH and not ENABLE_STANDALONE_AUTH:
+        import secrets
+
+        JWT_SECRET = secrets.token_urlsafe(32)
+        logger.info(
+            "Compute mode: Nest JWT primary — auto-generated JWT_SECRET for HS256 fallback only."
         )
     elif ENFORCE_STRONG_JWT_SECRET:
         logger.error("ERROR: JWT_SECRET not set and ENFORCE_STRONG_JWT_SECRET=true. Refusing to start.")
@@ -204,15 +260,25 @@ if not TAVILY_KEY:
     logger.warning("WARNING: TAVILY_API_KEY not set. Tavily web search will fail if used.")
 
 if not PINECONE_API_KEY:
-    logger.warning("WARNING: PINECONE_API_KEY not set. File uploads will not be vectorized.")
+    if IS_COMPUTE_MODE:
+        logger.info("[startup] PINECONE_API_KEY not set — expected in compute mode (SMS owns vectors).")
+    else:
+        logger.warning("WARNING: PINECONE_API_KEY not set. File uploads will not be vectorized.")
 
 if not REDIS_URL:
-    logger.error("ERROR: REDIS_URL is required for session/memory management.")
-    sys.exit(1)
+    if IS_COMPUTE_MODE:
+        logger.warning(
+            "WARNING: REDIS_URL not set — using in-memory rate limiting in compute mode."
+        )
+    else:
+        logger.error("ERROR: REDIS_URL is required for session/memory management.")
+        sys.exit(1)
 
 if not DATABASE_URL:
-    logger.error("ERROR: DATABASE_URL is required (Postgres student_copilot schema).")
-    sys.exit(1)
+    if REQUIRE_DATABASE:
+        logger.error("ERROR: DATABASE_URL is required (Postgres student_copilot schema).")
+        sys.exit(1)
+    logger.info("[startup] DATABASE_URL not set — OK for compute-only deploy.")
 
 if DATABASE_URL and ".railway.internal" in DATABASE_URL:
     logger.warning(
@@ -230,7 +296,8 @@ if not JWT_SECRET_ENV and not ENFORCE_STRONG_JWT_SECRET and not AUTH_DISABLED:
     logger.warning("WARNING: Using dynamically generated random JWT_SECRET. Set JWT_SECRET in .env for production.")
 
 logger.info(
-    "[startup] Config loaded. LLM=%s, ConvTTL=%ss, DB=postgres",
+    "[startup] Config loaded. LLM=%s, DEPLOY_MODE=%s, ConvTTL=%ss",
     LLM_PROVIDER,
+    DEPLOY_MODE,
     CONVERSATION_TTL_SECONDS,
 )

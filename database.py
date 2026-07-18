@@ -6,7 +6,11 @@ _store = None
 
 
 def get_db_store():
+    from config import DATABASE_URL
+
     global _store
+    if not DATABASE_URL:
+        return None
     if _store is None:
         from db.postgres_store import PostgresStore
 

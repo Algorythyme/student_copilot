@@ -11,9 +11,9 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 from llm_setup import llm
 from tools_setup import tools
@@ -101,6 +101,33 @@ async def _sovereign_agent(input_dict: dict, config=None) -> dict:
 
 agent_executor = RunnableLambda(_sovereign_agent)
 logger.info("[agent_core] Sovereign agent initialized (manual tool loop, zero agent-factory deps).")
+
+
+def history_to_messages(message_history: Optional[List[Dict[str, str]]] = None) -> list:
+    """Convert SMS/web inline {role, content} history to LangChain messages."""
+    messages = []
+    for msg in message_history or []:
+        role = (msg.get("role") or "user").lower()
+        content = msg.get("content") or ""
+        if role == "assistant":
+            messages.append(AIMessage(content=content))
+        else:
+            messages.append(HumanMessage(content=content))
+    return messages
+
+
+async def run_agent_inline(input_dict: dict) -> dict:
+    """
+    Run the sovereign agent with inline message history (no Redis session_id).
+    Expects chat_history as LangChain messages or omits it for a fresh turn.
+    """
+    payload = {
+        "input": input_dict.get("input", ""),
+        "user_profile": input_dict.get("user_profile", "no profile provided"),
+        "file_summaries": input_dict.get("file_summaries", "no uploaded file summaries"),
+        "chat_history": input_dict.get("chat_history") or [],
+    }
+    return await _sovereign_agent(payload)
 
 
 # --- FIX C1: Direct O(1) lookup instead of O(n) linear scan ---

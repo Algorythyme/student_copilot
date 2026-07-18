@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { API_BASE } from './config';
+import { getSupabase, isSupabaseConfigured } from './supabase';
 
 function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
@@ -10,17 +11,104 @@ interface AuthProps {
 }
 
 export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
+  const useSupabase = isSupabaseConfigured();
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [username, setUsername] = useState('');
   const [fullName, setFullName] = useState('');
   const [age, setAge] = useState('');
   const [country, setCountry] = useState('');
   const [classId, setClassId] = useState('');
   const [subjects, setSubjects] = useState('');
+
+  const handleSupabaseAuth = async () => {
+    const supabase = getSupabase();
+    if (mode === 'login') {
+      const { data, error: authError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      if (authError) {
+        throw new Error(authError.message);
+      }
+      const userId = data.user?.id;
+      if (!userId) {
+        throw new Error('Sign in succeeded but no user id was returned.');
+      }
+      localStorage.setItem('current_user', userId);
+      onLogin(userId);
+      return;
+    }
+
+    const { data, error: authError } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          full_name: fullName,
+          age: age ? parseInt(age, 10) : null,
+          country,
+          class_id: classId,
+          subjects,
+        },
+      },
+    });
+    if (authError) {
+      throw new Error(authError.message);
+    }
+    const userId = data.user?.id;
+    if (!userId) {
+      throw new Error('Registration succeeded but no user id was returned.');
+    }
+    localStorage.setItem('current_user', userId);
+    onLogin(userId);
+  };
+
+  const handleLegacyAuth = async () => {
+    if (mode === 'login') {
+      const res = await fetch(`${API_BASE}/auth/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Login failed' }));
+        throw new Error(err.detail || 'Invalid credentials');
+      }
+      const data = await res.json();
+      localStorage.setItem(`jwt_${data.user_id}`, data.access_token);
+      localStorage.setItem('current_user', data.user_id);
+      onLogin(data.user_id);
+      return;
+    }
+
+    const res = await fetch(`${API_BASE}/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username,
+        password,
+        role: 'student',
+        full_name: fullName,
+        age: age ? parseInt(age, 10) : null,
+        country,
+        class_id: classId,
+        subjects,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Registration failed' }));
+      throw new Error(err.detail || 'Failed to create account');
+    }
+    const data = await res.json();
+    localStorage.setItem(`jwt_${data.user_id}`, data.access_token);
+    localStorage.setItem('current_user', data.user_id);
+    onLogin(data.user_id);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -28,39 +116,10 @@ export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
     setLoading(true);
 
     try {
-      if (mode === 'login') {
-        const res = await fetch(`${API_BASE}/auth/token`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password })
-        });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ detail: 'Login failed' }));
-          throw new Error(err.detail || 'Invalid credentials');
-        }
-        const data = await res.json();
-        localStorage.setItem(`jwt_${data.user_id}`, data.access_token);
-        localStorage.setItem('current_user', data.user_id);
-        onLogin(data.user_id);
+      if (useSupabase) {
+        await handleSupabaseAuth();
       } else {
-        const res = await fetch(`${API_BASE}/auth/register`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            username, password, role: 'student',
-            full_name: fullName,
-            age: age ? parseInt(age) : null,
-            country, class_id: classId, subjects
-          })
-        });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ detail: 'Registration failed' }));
-          throw new Error(err.detail || 'Failed to create account');
-        }
-        const data = await res.json();
-        localStorage.setItem(`jwt_${data.user_id}`, data.access_token);
-        localStorage.setItem('current_user', data.user_id);
-        onLogin(data.user_id);
+        await handleLegacyAuth();
       }
     } catch (err: unknown) {
       setError(getErrorMessage(err, 'Authentication failed'));
@@ -74,6 +133,9 @@ export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
       <div className="auth-card">
         <h1>Student Copilot</h1>
         <p className="subtitle">Your AI-powered study partner</p>
+        {useSupabase && (
+          <p className="subtitle">Web demo — Supabase Auth</p>
+        )}
 
         <div className="auth-tabs">
           <button className={`auth-tab ${mode === 'login' ? 'active' : ''}`} onClick={() => setMode('login')} type="button">
@@ -85,10 +147,17 @@ export const AuthScreen: React.FC<AuthProps> = ({ onLogin }) => {
         </div>
 
         <form onSubmit={handleSubmit}>
-          <div className="field">
-            <label>Username</label>
-            <input type="text" required value={username} onChange={e => setUsername(e.target.value)} placeholder="e.g. johndoe" />
-          </div>
+          {useSupabase ? (
+            <div className="field">
+              <label>Email</label>
+              <input type="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" />
+            </div>
+          ) : (
+            <div className="field">
+              <label>Username</label>
+              <input type="text" required value={username} onChange={e => setUsername(e.target.value)} placeholder="e.g. johndoe" />
+            </div>
+          )}
           <div className="field">
             <label>Password</label>
             <input type="password" required value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" />

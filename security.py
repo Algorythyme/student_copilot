@@ -1,4 +1,4 @@
-"""Nest-first auth for Student Copilot (aligned with pedagic_01)."""
+"""Nest-first and Supabase auth for Student Copilot."""
 
 from __future__ import annotations
 
@@ -12,6 +12,11 @@ from config import (
     AUTH_DISABLED,
     AUTH_DISABLED_ROLE,
     AUTH_DISABLED_USER_ID,
+    DEPLOY_MODE,
+    ENABLE_NEST_AUTH,
+    ENABLE_STANDALONE_AUTH,
+    ENABLE_SUPABASE_AUTH,
+    IS_COMPUTE_MODE,
     SMS_SCHOOL_ID,
     logger,
     validate_safe_string,
@@ -22,18 +27,25 @@ from nest_auth import (
     is_student_copilot_role,
     verify_bearer_token,
 )
+from supabase_auth import is_likely_supabase_token, verify_supabase_token
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def ensure_user_profile(identity: VerifiedIdentity) -> None:
-    """Upsert a minimal student row from Nest JWT claims."""
-    if identity.source not in ("nest-rs256", "nest-hs256", "disabled"):
+    """Upsert a minimal student row from Nest or Supabase JWT claims (web/full only)."""
+    if IS_COMPUTE_MODE:
+        return
+
+    if identity.source not in ("nest-rs256", "nest-hs256", "disabled", "supabase"):
         return
 
     from database import get_db_store
 
     store = get_db_store()
+    if not store:
+        return
+
     user_id = validate_safe_string(identity.user_id, "user_id")
     full_name = (
         identity.email
@@ -41,6 +53,10 @@ def ensure_user_profile(identity: VerifiedIdentity) -> None:
         or identity.claims.get("full_name")
         or user_id
     )
+    metadata = identity.claims.get("user_metadata") or {}
+    if isinstance(metadata, dict):
+        full_name = metadata.get("full_name") or metadata.get("name") or full_name
+
     row = {
         "user_id": user_id,
         "username": user_id,
@@ -64,9 +80,33 @@ def ensure_user_profile(identity: VerifiedIdentity) -> None:
             ).eq("user_id", user_id).execute()
         else:
             store.table("users").insert(row).execute()
-            logger.info("[auth] Created student_copilot user from Nest JWT: %s", user_id)
+            logger.info("[auth] Created student_copilot user from JWT: %s", user_id)
     except Exception as exc:
         logger.error("[auth] Failed to ensure user profile for %s: %s", user_id, exc)
+
+
+def _verify_nest_token(token: str) -> VerifiedIdentity:
+    identity = verify_bearer_token(token)
+    if not is_student_copilot_role(identity.role) and not identity.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Role not permitted for Student Copilot",
+        )
+    return identity
+
+
+def _resolve_identity_from_token(token: str) -> VerifiedIdentity:
+    if ENABLE_SUPABASE_AUTH and is_likely_supabase_token(token):
+        try:
+            return verify_supabase_token(token)
+        except jwt.InvalidTokenError:
+            if DEPLOY_MODE == "web" and not ENABLE_NEST_AUTH and not ENABLE_STANDALONE_AUTH:
+                raise HTTPException(status_code=401, detail="Invalid Supabase token.")
+
+    if ENABLE_NEST_AUTH or ENABLE_STANDALONE_AUTH:
+        return _verify_nest_token(token)
+
+    raise HTTPException(status_code=401, detail="No auth provider enabled for this deploy mode.")
 
 
 async def get_current_identity(
@@ -110,10 +150,12 @@ async def get_current_identity(
         if not token:
             raise HTTPException(
                 status_code=401,
-                detail="Authentication required. Send a valid Nest JWT Bearer token.",
+                detail="Authentication required. Send a valid Bearer token.",
             )
         try:
-            identity = verify_bearer_token(token)
+            identity = _resolve_identity_from_token(token)
+        except HTTPException:
+            raise
         except jwt.ExpiredSignatureError:
             raise HTTPException(
                 status_code=401,
@@ -122,19 +164,18 @@ async def get_current_identity(
         except jwt.InvalidTokenError:
             raise HTTPException(status_code=401, detail="Invalid authentication token.")
 
-        if not is_student_copilot_role(identity.role) and not identity.is_admin:
-            raise HTTPException(
-                status_code=403,
-                detail="Role not permitted for Student Copilot",
-            )
-
     identity_user_id = validate_safe_string(identity.user_id, "user_id")
     request.state.user_role = identity.role
     request.state.school_id = identity.school_id
     request.state.auth_source = identity.source
     request.state.current_identity = identity
 
-    if identity.source in ("nest-rs256", "nest-hs256", "disabled"):
+    if not IS_COMPUTE_MODE and identity.source in (
+        "nest-rs256",
+        "nest-hs256",
+        "disabled",
+        "supabase",
+    ):
         ensure_user_profile(identity)
 
     return VerifiedIdentity(

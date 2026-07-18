@@ -43,11 +43,9 @@ from file_utils import process_uploaded_file
 from ai_summarizer import generate_conversation_title
 
 # ΓöÇΓöÇΓöÇ RATE LIMITING ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-
-limiter = Limiter(key_func=get_remote_address, storage_uri=config.REDIS_URL)
+from rate_limit import limiter
 
 # ΓöÇΓöÇΓöÇ STREAMING UPLOAD GUARD ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB hard limit
@@ -139,7 +137,46 @@ app.openapi_tags = [
     {"name": "AI Tutor Core", "description": "Chat and file upload endpoints."},
     {"name": "Notebook Oracle", "description": "Ground-truth retrieval from vectorized documents."},
     {"name": "Revision Mode", "description": "Socratic assessment engine."},
+    {"name": "Compute API", "description": "Stateless LLM compute for SMS integration."},
 ]
+
+if config.COMPUTE_ROUTES_ENABLED:
+    from compute_routes import router as compute_router
+
+    app.include_router(compute_router)
+    logger.info("[startup] Compute API routes registered (/api/v1/compute/*).")
+
+@app.middleware("http")
+async def deploy_mode_gate(request: Request, call_next):
+    """Restrict HTTP surface by DEPLOY_MODE (compute vs web demo)."""
+    path = request.url.path
+
+    if config.DEPLOY_MODE == "compute":
+        allowed = (
+            path in ("/", "/health", "/docs", "/openapi.json", "/redoc")
+            or path.startswith("/api/v1/compute")
+        )
+        if not allowed:
+            return JSONResponse(
+                status_code=404,
+                content=ErrorResponse(
+                    error="Not available in compute mode",
+                    code=404,
+                    detail=f"Path {path} is disabled when DEPLOY_MODE=compute.",
+                ).model_dump(),
+            )
+    elif config.DEPLOY_MODE == "web":
+        if path.startswith("/api/v1/compute"):
+            return JSONResponse(
+                status_code=404,
+                content=ErrorResponse(
+                    error="Compute HTTP API disabled in web mode",
+                    code=404,
+                    detail="Web demo uses legacy/BFF routes; call compute_service internally.",
+                ).model_dump(),
+            )
+
+    return await call_next(request)
 
 # ΓöÇΓöÇΓöÇ GLOBAL EXCEPTION HANDLER ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 @app.exception_handler(HTTPException)
@@ -198,26 +235,31 @@ if _HAS_FRONTEND:
 
 @app.get("/")
 async def root():
-    if _HAS_FRONTEND:
+    if _HAS_FRONTEND and config.SERVE_WEB:
         return FileResponse(_FRONTEND_INDEX)
     return {
         "service": "student_copilot API",
         "status": "online",
+        "mode": config.DEPLOY_MODE,
         "message": "Sovereign AI Tutor Backend is running."
     }
 
 @app.get("/health")
 async def health_check() -> Dict[str, str]:
+    if config.IS_COMPUTE_MODE:
+        return {"status": "ok", "mode": config.DEPLOY_MODE}
+
     from session_manager import redis_client as r
     from db.connection import db_connection
 
     try:
         if r:
             r.ping()
-        with db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT 1")
-        return {"status": "ok", "db_backend": "postgres"}
+        if config.DATABASE_URL:
+            with db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT 1")
+        return {"status": "ok", "mode": config.DEPLOY_MODE, "db_backend": "postgres"}
     except Exception as e:
         logger.error(f"[health] Health check failed: {e}")
         raise HTTPException(status_code=503, detail="Health check failed")
@@ -1675,7 +1717,7 @@ async def evaluate_exam(
 # =============================================================================
 # FRONTEND STATIC FILE SERVING (must be AFTER all API routes)
 # =============================================================================
-if _HAS_FRONTEND:
+if _HAS_FRONTEND and config.SERVE_WEB:
     # Serve Vite build assets (JS, CSS, images)
     app.mount("/assets", StaticFiles(directory=os.path.join(_FRONTEND_DIST, "assets")), name="frontend_assets")
 

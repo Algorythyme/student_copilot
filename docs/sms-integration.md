@@ -6,10 +6,10 @@ This document describes how the Pedagic SMS Nest backend integrates with the **c
 
 | System | Owns |
 |--------|------|
-| **SMS** | Users, conversations, messages, file summaries, vector ingest & retrieval, persistence |
+| **SMS (Nest)** | Users, sessions, **all RAG** (pgvector on Prisma Postgres), approved-artifact ingest, persistence |
 | **Copilot (compute)** | JWT verification, LLM inference, structured JSON responses (no DB writes) |
 
-Copilot is **stateless**: every request must include full context. SMS is the system of record.
+Copilot is **stateless**: every request must include full context in the body. SMS supplies **`context_chunks`** from approved Teacher Copilot artifacts (`AiLessonNote`, `AiHandout`) only — not uploads, not user-type KBs, not Pinecone/Supabase in compute mode.
 
 ## Authentication
 
@@ -62,14 +62,13 @@ One chat turn with full history and RAG context from SMS.
     { "role": "user", "content": "What is a cell?" },
     { "role": "assistant", "content": "A cell is..." }
   ],
-  "file_summaries": [
-    { "filename": "notes.pdf", "summary": "Chapter 3 covers plant biology..." }
-  ],
   "context_chunks": [
     { "source": "Biology Syllabus", "content": "Photosynthesis converts light..." }
   ]
 }
 ```
+
+`file_summaries` is **optional and unused** in the SMS integration path — Nest does not send upload-derived summaries for KB.
 
 **Response**
 
@@ -194,18 +193,17 @@ Optional end-of-session learning method analysis.
 ## Nest integration flow (pseudo-code)
 
 ```typescript
-const history = await smsDb.getMessages(conversationId);
-const chunks = await smsVectorSearch.query({
-  userId, schoolId, subject, query: message,
+const history = await smsDb.getStudentCopilotMessages(sessionId);
+const chunks = await smsEmbeddings.retrieve({
+  schoolId, classId, subjectId, query: message,
 });
 const { reply } = await copilot.post('/api/v1/compute/chat', {
   message,
   message_history: history,
   context_chunks: chunks,
-  file_summaries: await smsDb.getFileSummaries(conversationId),
-  user_profile: await smsDb.getUserProfile(userId),
+  user_profile: await smsDb.getStudentProfile(userId), // personalization only
 });
-await smsDb.saveMessage(conversationId, 'assistant', reply);
+await smsDb.saveMessage(sessionId, 'assistant', reply);
 ```
 
 ## Idempotency

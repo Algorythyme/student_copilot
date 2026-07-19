@@ -115,8 +115,8 @@ def save_conversation_data_to_db(conversation_id: str, profile: Dict[str, Any], 
             redis_client.set(_get_profile_key(conversation_id), json.dumps(profile), ex=ttl)
             redis_client.set(_get_summaries_key(conversation_id), json.dumps(summaries), ex=ttl)
             redis_client.set(_get_title_key(conversation_id), title, ex=ttl)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[session_manager] Redis cache mirror failed for {conversation_id}: {e}")
 
 
 # --- User Global Data ---
@@ -129,8 +129,8 @@ def load_user_learning_method(user_id: str) -> Optional[str]:
             res = db_store.table('users').select('learning_method').eq('user_id', user_id).execute()
             if res.data:
                 return res.data[0].get("learning_method")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[session_manager] Failed to load learning method for {user_id}: {e}")
     return None
 
 def save_user_learning_method(user_id: str, method: str):

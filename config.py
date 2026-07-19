@@ -52,6 +52,14 @@ except (ValueError, TypeError):
     logger.warning("[startup] Invalid LLM_TEMPERATURE value. Defaulting to 0.7.")
     LLM_TEMPERATURE = 0.7
 
+# Per-call LLM timeout so a hung provider request cannot hold a compute
+# request open indefinitely (the Nest client itself times out at ~120s).
+try:
+    LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "90"))
+except (ValueError, TypeError):
+    logger.warning("[startup] Invalid LLM_TIMEOUT_SECONDS value. Defaulting to 90.")
+    LLM_TIMEOUT_SECONDS = 90.0
+
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "student-copilot")
 PINECONE_CLOUD = os.getenv("PINECONE_CLOUD", "aws")

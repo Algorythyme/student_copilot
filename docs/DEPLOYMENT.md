@@ -27,6 +27,15 @@ GEMINI_API_KEY=...
 LLM_PROVIDER=gemini
 ```
 
+### Optional env
+
+```env
+# Per-LLM-call timeout in seconds (default 90)
+LLM_TIMEOUT_SECONDS=90
+# Redis-backed rate limiting (recommended in prod; in-memory fallback if unset)
+REDIS_URL=...
+```
+
 4. Copy public URL to backend `STUDENT_COPILOT_COMPUTE_URL`
 
 ## Local

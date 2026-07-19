@@ -2,7 +2,7 @@
 from config import (
     OPENAI_API_KEY, OPENAI_MODEL_NAME, REDIS_URL, logger, LLM_PROVIDER,
     GEMINI_API_KEY, PINECONE_API_KEY, PINECONE_INDEX_NAME, PINECONE_CLOUD, PINECONE_REGION,
-    GEMINI_MODEL_NAME, GEMINI_EMBEDDING_MODEL, LLM_TEMPERATURE,
+    GEMINI_MODEL_NAME, GEMINI_EMBEDDING_MODEL, LLM_TEMPERATURE, LLM_TIMEOUT_SECONDS,
     DEEPSEEK_API_KEY, DEEPSEEK_MODEL_NAME, DEEPSEEK_BASE_URL,
     IS_COMPUTE_MODE,
 )
@@ -28,6 +28,8 @@ def _gemini_chat():
         model=GEMINI_MODEL_NAME,
         google_api_key=GEMINI_API_KEY,
         temperature=LLM_TEMPERATURE,
+        timeout=LLM_TIMEOUT_SECONDS,
+        max_retries=2,
     )
 
 def _gemini_embeddings():
@@ -44,6 +46,8 @@ def _openai_chat():
         model=OPENAI_MODEL_NAME,
         temperature=LLM_TEMPERATURE,
         streaming=True,
+        timeout=LLM_TIMEOUT_SECONDS,
+        max_retries=2,
     )
 
 def _deepseek_chat():
@@ -54,6 +58,8 @@ def _deepseek_chat():
         model=DEEPSEEK_MODEL_NAME,
         temperature=LLM_TEMPERATURE,
         streaming=True,
+        timeout=LLM_TIMEOUT_SECONDS,
+        max_retries=2,
     )
 
 # All providers use Gemini embeddings (universal). embeddings_factory=None → Gemini fallback.
@@ -153,8 +159,8 @@ def _ensure_pinecone_index() -> None:
                 if ready is True:
                     logger.info(f"[startup] Pinecone index {PINECONE_INDEX_NAME!r} is ready")
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[startup] Pinecone readiness poll failed (will retry): {e}")
             time.sleep(2)
 
         logger.warning(f"[startup] Pinecone index {PINECONE_INDEX_NAME!r} provisioning not confirmed ready within timeout; continuing.")

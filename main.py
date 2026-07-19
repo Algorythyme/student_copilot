@@ -1273,8 +1273,8 @@ async def notebook_ask(
                             content = res.data[0]["content"]
                             parent_texts.append(content)
                             r.hset(pid, "content", content)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("[rag] Parent chunk read-through failed for %s: %s", pid, exc)
                 
         if parent_texts:
             context = "\n\n---\n\n".join(parent_texts)
@@ -1600,8 +1600,8 @@ async def generate_exam(
                             content = res.data[0]["content"]
                             parent_texts.append(content)
                             r.hset(pid, "content", content)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("[rag] Parent chunk read-through failed for %s: %s", pid, exc)
                 
         if parent_texts:
             context = "\n\n---\n\n".join(parent_texts)
@@ -1680,8 +1680,8 @@ async def evaluate_exam(
                             content = res.data[0]["content"]
                             parent_texts.append(content)
                             r.hset(pid, "content", content)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("[rag] Parent chunk read-through failed for %s: %s", pid, exc)
                 
         if parent_texts:
             context = "\n\n---\n\n".join(parent_texts)

@@ -1,35 +1,35 @@
+# Floors match the locally tested environment (July 2026); caps block breaking majors.
+
 # Core framework
-fastapi[standard]>=0.115.0,<1.0.0
-pydantic>=2.10.0,<3.0.0
+fastapi[standard]>=0.135.3,<1.0.0
+pydantic>=2.12.0,<3.0.0
 python-dotenv>=1.0.0,<2.0.0
-python-multipart>=0.0.12,<1.0.0
+python-multipart>=0.0.18,<1.0.0
 
 # Auth and security
 PyJWT>=2.10.0,<3.0.0
-cryptography>=42.0.0,<46.0.0
+cryptography>=42.0.0,<48.0.0
 slowapi>=0.1.9,<1.0.0
 
 # Shared Railway data/storage. Do not add Supabase client packages.
 redis>=5.0.0,<8.0.0
 psycopg2-binary>=2.9.9,<3.0.0
-pinecone>=5.1.0,<9.0.0
+pinecone>=7.3.0,<9.0.0
 
-# LangChain ecosystem
-langchain>=0.3.0,<2.0.0
-langchain-community>=0.3.0,<2.0.0
-langchain-core>=0.3.0,<2.0.0
-langchain-openai>=0.3.0,<2.0.0
-langchain-google-genai>=2.0.0,<5.0.0
-langchain-pinecone>=0.2.0,<1.0.0
-langchain-text-splitters>=0.3.0,<2.0.0
-langchain-redis>=0.2.0,<1.0.0
-langchain-tavily>=0.1.0,<1.0.0
+# LangChain ecosystem (v1 line)
+langchain>=1.2.14,<2.0.0
+langchain-community>=0.4.1,<1.0.0
+langchain-core>=1.2.24,<2.0.0
+langchain-openai>=1.1.9,<2.0.0
+langchain-google-genai>=4.2.1,<5.0.0
+langchain-pinecone>=0.2.13,<1.0.0
+langchain-text-splitters>=1.1.1,<2.0.0
 
 # Document processing
 pymupdf4llm>=0.0.17,<2.0.0
-pypdf>=4.0.0,<6.0.0
+pypdf>=5.1.0,<6.0.0
 
 # Search and AI providers
-tavily-python>=0.5.0,<1.0.0
-openai>=1.50.0,<2.0.0
+tavily-python>=0.7.0,<1.0.0
+openai>=1.109.0,<2.0.0
 numpy>=1.26.0,<3.0.0

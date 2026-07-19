@@ -1,11 +1,12 @@
 ﻿# tools_setup.py
+import asyncio
 from typing import List, Optional
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 from tavily import TavilyClient
 
-from config import TAVILY_KEY, logger # NEW: Import logger
+from config import TAVILY_KEY, logger
 
 
 class TavilySearchArgs(BaseModel):
@@ -32,9 +33,16 @@ def _tavily_search(query: str, include_domains: Optional[List[str]] = None, excl
     return results or []
 
 
+async def _tavily_search_async(query: str, include_domains: Optional[List[str]] = None, exclude_domains: Optional[List[str]] = None):
+    # TavilyClient is synchronous; run it in a worker thread so a slow search
+    # cannot block the event loop while the agent awaits the tool.
+    return await asyncio.to_thread(_tavily_search, query, include_domains, exclude_domains)
+
+
 tavily_tool = (
     StructuredTool.from_function(
         func=_tavily_search,
+        coroutine=_tavily_search_async,
         name="tavily_search",
         description="Search the web for current information and return a list of results with URLs.",
         args_schema=TavilySearchArgs,

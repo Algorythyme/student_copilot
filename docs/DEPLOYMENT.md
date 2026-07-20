@@ -2,18 +2,23 @@
 
 Deploy as **compute-only** for SMS integration.
 
-## Master documentation
+**GitHub repo:** `Algorythyme/student_copilot` · **Verified path:** [Deploy student copilot compute (detailed)](../../docs/DEPLOY-STUDENT-COPILOT-COMPUTE.md)
 
-- [Deploy student copilot compute (detailed)](../../docs/DEPLOY-STUDENT-COPILOT-COMPUTE.md)
-- [SMS integration contract](./sms-integration.md)
+---
 
-## Railway (Docker)
+## Railway (Docker) — quick checklist
 
-1. Root directory: `Hey-Nova.ai`
-2. Dockerfile: `Dockerfile` (set `PORT=8003` or override start command)
-3. Health: `/health`
+1. Connect repo **`student_copilot`**, branch **`integ`**
+2. Builder: **`Dockerfile`** (`railway.toml`)
+3. **Custom Start Command:** leave **empty** or `python main.py` only — **never** `--port 8003`
+4. **Do not** set `PORT=8003` — Railway injects `PORT`; `main.py` reads it
+5. Set compute env vars (below)
+6. Deploy → `GET /health`
+7. Set backend `STUDENT_COPILOT_COMPUTE_URL` → redeploy backend
 
-### Required env (compute)
+---
+
+## Required env (compute)
 
 ```env
 DEPLOY_MODE=compute
@@ -22,21 +27,38 @@ REQUIRE_DATABASE=false
 ENABLE_NEST_AUTH=true
 ENABLE_SUPABASE_AUTH=false
 ENABLE_STANDALONE_AUTH=false
-NEST_JWT_PUBLIC_KEY_URL=https://<backend>/api/v1/auth/public-key
-GEMINI_API_KEY=...
+AUTH_DISABLED=false
+
+NEST_JWT_PUBLIC_KEY_URL=https://<backend-public-url>/api/v1/auth/public-key
+JWT_ISSUER=Pedagic School Management
+JWT_AUDIENCE=school-users
+
 LLM_PROVIDER=gemini
+GEMINI_API_KEY=...
+
+CORS_ALLOW_ORIGINS=https://<backend-public-url>
 ```
 
-### Optional env
+Do **not** set `JWT_PRIVATE_KEY`, `JWT_SECRET` (prod), `DATABASE_URL`, or manual `PORT=8003`.
+
+---
+
+## Optional env
 
 ```env
-# Per-LLM-call timeout in seconds (default 90)
 LLM_TIMEOUT_SECONDS=90
-# Redis-backed rate limiting (recommended in prod; in-memory fallback if unset)
-REDIS_URL=...
+REDIS_URL=${{Redis.REDIS_URL}}
 ```
 
-4. Copy public URL to backend `STUDENT_COPILOT_COMPUTE_URL`
+---
+
+## Wire to backend
+
+```env
+STUDENT_COPILOT_COMPUTE_URL=https://<copilot-public-url>
+```
+
+---
 
 ## Local
 
@@ -44,8 +66,14 @@ REDIS_URL=...
 uvicorn main:app --host 0.0.0.0 --port 8003 --reload
 ```
 
+See `.env.example` **PROFILE A — COMPUTE**.
+
+---
+
 ## Notes
 
 - Sessions and RAG live in **Nest Postgres**, not this service
 - Frontend uses `/api/v1/student-copilot/*` via Nest JWT
-- Standalone Supabase/Pinecone modes are for legacy demo only
+- Supabase/Pinecone modes are legacy demo only
+
+See [SMS integration contract](./sms-integration.md).

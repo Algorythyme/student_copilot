@@ -197,6 +197,75 @@ def get_user_conversation_ids(user_id: str) -> List[Dict[str, str]]:
         return []
 
 
+def delete_conversation(user_id: str, conversation_id: str) -> bool:
+    """Deletes a conversation owned by user_id from DB, Redis cache, and in-memory SESSIONS.
+
+    Returns True if the conversation row was deleted (or already absent after ownership check).
+    Raises RuntimeError on persistence/Redis failures.
+    """
+    from database import get_db_store
+    db_store = get_db_store()
+    if not db_store:
+        raise RuntimeError("Database persistence not configured.")
+
+    try:
+        res = (
+            db_store.table("conversations")
+            .select("id")
+            .eq("id", conversation_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        if not res.data:
+            return False
+    except Exception as e:
+        logger.error(
+            f"[session_manager] Ownership check failed for delete {conversation_id}/{user_id}: {e}"
+        )
+        raise RuntimeError(f"Failed to verify conversation ownership: {e}") from e
+
+    try:
+        db_store.table("conversations").delete().eq("id", conversation_id).eq(
+            "user_id", user_id
+        ).execute()
+    except Exception as e:
+        logger.error(f"[session_manager] DB delete failed for {conversation_id}: {e}")
+        raise RuntimeError(f"Failed to delete conversation: {e}") from e
+
+    # Drop Redis ownership + metadata + chat history keys.
+    if redis_client:
+        try:
+            redis_client.srem(_get_user_conversations_key(user_id), conversation_id)
+            redis_client.delete(
+                _get_profile_key(conversation_id),
+                _get_summaries_key(conversation_id),
+                _get_title_key(conversation_id),
+                f"chat:{conversation_id}",
+            )
+        except Exception as e:
+            logger.warning(
+                f"[session_manager] Redis cleanup warning for {conversation_id}: {e}"
+            )
+
+    # Clear in-memory cache entry if present.
+    user_convs = SESSIONS.get(user_id)
+    if user_convs and conversation_id in user_convs:
+        try:
+            hist = user_convs[conversation_id].get("chat_history_redis")
+            if hist is not None and hasattr(hist, "clear"):
+                hist.clear()
+        except Exception as e:
+            logger.warning(
+                f"[session_manager] Redis history clear warning for {conversation_id}: {e}"
+            )
+        del user_convs[conversation_id]
+        if not user_convs:
+            del SESSIONS[user_id]
+
+    logger.info(f"[session_manager] Deleted conversation {conversation_id} for {user_id}.")
+    return True
+
+
 # --- Conversation History ---
 def get_conversation_history(user_id: str, conversation_id: str) -> Optional[RedisChatMessageHistory]:
     """

@@ -35,7 +35,7 @@ from security import get_current_identity, get_current_user, bearer_scheme
 from models import ChatRequest, ConversationItem, NewConversationRequest
 from session_manager import (
     SESSIONS, get_conversation_history, save_conversation_data_to_db,
-    create_new_conversation_id, get_user_conversation_ids,
+    create_new_conversation_id, get_user_conversation_ids, delete_conversation,
     load_user_learning_method, save_user_learning_method
 )
 from agent_core import with_message_history
@@ -719,6 +719,30 @@ async def get_conversation_messages(
     except Exception as e:
         logger.error(f"[main] Error loading messages for {conversation_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to load conversation messages.")
+
+
+@app.delete("/conversations/{conversation_id}", tags=["Conversation Management"])
+async def delete_user_conversation(
+    conversation_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Delete a conversation owned by the authenticated user (DB + Redis + cache)."""
+    conversation_id = validate_safe_string(conversation_id, "conversation_id")
+    logger.info(f"[main] User {user_id} deleting conversation {conversation_id}")
+    try:
+        async with _get_conv_lock(conversation_id):
+            deleted = delete_conversation(user_id, conversation_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Conversation not found or access denied.")
+        return {"deleted": True, "conversation_id": conversation_id}
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        logger.error(f"[main] Delete conversation runtime error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"[main] Delete conversation error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete conversation.")
 
 
 @app.post("/conversations/{conversation_id}/end", tags=["Conversation Management"])

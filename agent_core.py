@@ -13,7 +13,7 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from typing import Dict, Any, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from llm_setup import llm
 from tools_setup import tools
@@ -128,6 +128,88 @@ async def run_agent_inline(input_dict: dict) -> dict:
         "chat_history": input_dict.get("chat_history") or [],
     }
     return await _sovereign_agent(payload)
+
+
+def _chunk_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+            else:
+                text = getattr(item, "text", None)
+                if text:
+                    parts.append(str(text))
+        return "".join(parts)
+    return str(content)
+
+
+async def run_agent_inline_stream(input_dict: dict) -> AsyncIterator[str]:
+    """
+    Same sovereign agent as run_agent_inline, but yields final-answer tokens via SSE.
+    Tool-call turns are buffered (not streamed) so partial tool scratch is never shown.
+    """
+    rendered = _prompt.invoke({
+        "input": input_dict.get("input", ""),
+        "chat_history": input_dict.get("chat_history") or [],
+        "user_profile": input_dict.get("user_profile", "no profile provided"),
+        "file_summaries": input_dict.get("file_summaries", "no uploaded file summaries"),
+    })
+    messages = list(rendered.to_messages())
+
+    for iteration in range(_MAX_TOOL_ITERATIONS):
+        response = None
+        saw_tool_calls = False
+        streamed_any = False
+
+        async for chunk in _llm_with_tools.astream(messages):
+            response = chunk if response is None else response + chunk
+            tool_bits = getattr(chunk, "tool_call_chunks", None) or getattr(
+                chunk, "tool_calls", None
+            )
+            if tool_bits:
+                saw_tool_calls = True
+            text = _chunk_text(getattr(chunk, "content", None))
+            # Stream only once we know this turn is a plain text answer.
+            if text and not saw_tool_calls and not getattr(response, "tool_calls", None):
+                streamed_any = True
+                yield text
+
+        if response is None:
+            break
+
+        messages.append(response)
+        tool_calls = getattr(response, "tool_calls", None)
+        if not tool_calls:
+            if not streamed_any:
+                final = _chunk_text(getattr(response, "content", None))
+                if final:
+                    yield final
+            break
+
+        logger.info(
+            f"[agent_core] Stream iteration {iteration + 1}: executing {len(tool_calls)} tool call(s)."
+        )
+        for tc in tool_calls:
+            tool_fn = _tool_map.get(tc["name"])
+            if tool_fn:
+                try:
+                    result = await tool_fn.ainvoke(tc["args"])
+                except Exception as e:
+                    logger.error(f"[agent_core] Tool '{tc['name']}' error: {e}")
+                    result = f"Tool execution failed: {e}"
+            else:
+                logger.warning(f"[agent_core] Unknown tool requested: {tc['name']}")
+                result = f"Unknown tool: {tc['name']}"
+            messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+    else:
+        yield "I couldn't generate a response. Please try again."
 
 
 # --- FIX C1: Direct O(1) lookup instead of O(n) linear scan ---

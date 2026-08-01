@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
-from agent_core import run_agent_inline
+from agent_core import run_agent_inline, run_agent_inline_stream
 from ai_summarizer import evaluate_session_learning_method
 from compute_models import (
     ComputeChatRequest,
@@ -68,7 +68,7 @@ def _build_context_text(chunks: List[ContextChunk]) -> str:
     return "\n\n---\n\n".join(parent_texts)
 
 
-async def compute_chat(payload: ComputeChatRequest) -> Dict[str, Any]:
+def _build_chat_input(payload: ComputeChatRequest) -> Dict[str, Any]:
     profile_text = _format_user_profile(payload.user_profile)
     summaries_text = _format_file_summaries(payload.file_summaries)
     context_text = _format_context_chunks(payload.context_chunks)
@@ -78,16 +78,27 @@ async def compute_chat(payload: ComputeChatRequest) -> Dict[str, Any]:
         combined_context = f"{summaries_text}\n\n{context_text}" if summaries_text else context_text
 
     history = [item.model_dump() for item in payload.message_history]
-    input_dict = {
+    return {
         "input": payload.message,
         "user_profile": profile_text,
         "file_summaries": combined_context or "no uploaded file summaries",
         "chat_history": _history_to_langchain(history),
     }
 
+
+async def compute_chat(payload: ComputeChatRequest) -> Dict[str, Any]:
+    input_dict = _build_chat_input(payload)
     result = await run_agent_inline(input_dict)
     reply = result.get("output", "I'm sorry, I couldn't process that request.")
     return {"reply": reply, "learning_method_suggestion": None}
+
+
+async def compute_chat_stream(payload: ComputeChatRequest) -> AsyncIterator[str]:
+    """Yield plain-text reply tokens for SSE proxying by Nest."""
+    input_dict = _build_chat_input(payload)
+    async for token in run_agent_inline_stream(input_dict):
+        if token:
+            yield token
 
 
 async def compute_revision_generate(payload: ComputeRevisionGenerateRequest) -> Dict[str, Any]:

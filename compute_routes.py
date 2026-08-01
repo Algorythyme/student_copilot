@@ -1,9 +1,11 @@
 """Stateless compute API routes for SMS integration."""
 
+import json
 import time
 from typing import Any, Awaitable, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 import compute_service
 from compute_models import (
@@ -75,6 +77,69 @@ async def compute_chat(
         "chat", identity, compute_service.compute_chat(payload), "Chat processing failed."
     )
     return ComputeChatResponse(**result)
+
+
+@router.post("/chat/stream")
+@limiter.limit(RATE_LIMIT_CHAT)
+async def compute_chat_stream(
+    request: Request,
+    payload: ComputeChatRequest,
+    identity: VerifiedIdentity = Depends(get_current_identity),
+) -> StreamingResponse:
+    """
+    SSE chat stream for Nest proxy.
+    Events: token {text}, done {reply}, error {detail}
+    """
+    logger.info(
+        "[compute] chat/stream started user=%s school=%s history_len=%d chunks=%d",
+        identity.user_id,
+        identity.school_id,
+        len(payload.message_history),
+        len(payload.context_chunks),
+    )
+    started = time.monotonic()
+
+    async def event_stream():
+        parts: list[str] = []
+        try:
+            async for token in compute_service.compute_chat_stream(payload):
+                parts.append(token)
+                yield f"data: {json.dumps({'type': 'token', 'text': token}, ensure_ascii=False)}\n\n"
+            reply = "".join(parts).strip() or "I'm sorry, I couldn't process that request."
+            yield f"data: {json.dumps({'type': 'done', 'reply': reply}, ensure_ascii=False)}\n\n"
+            logger.info(
+                "[compute] chat/stream completed in %.1fs (user=%s school=%s)",
+                time.monotonic() - started,
+                identity.user_id,
+                identity.school_id,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "[compute] chat/stream rejected after %.1fs (user=%s): %s",
+                time.monotonic() - started,
+                identity.user_id,
+                exc,
+            )
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)}, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            logger.error(
+                "[compute] chat/stream failed after %.1fs (user=%s): %s",
+                time.monotonic() - started,
+                identity.user_id,
+                exc,
+                exc_info=True,
+            )
+            yield f"data: {json.dumps({'type': 'error', 'detail': 'Chat processing failed.'}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/revision/generate", response_model=ComputeRevisionGenerateResponse)

@@ -30,6 +30,7 @@ def _gemini_chat():
         temperature=LLM_TEMPERATURE,
         timeout=LLM_TIMEOUT_SECONDS,
         max_retries=2,
+        streaming=True,
     )
 
 def _gemini_embeddings():

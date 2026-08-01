@@ -808,7 +808,12 @@ async def upload_file(
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
-    conversation_data["summaries"].append({"filename": file.filename, "summary": summary})
+    attachment_id = str(uuid.uuid4())
+    conversation_data["summaries"].append({
+        "id": attachment_id,
+        "filename": file.filename,
+        "summary": summary,
+    })
     save_conversation_data_to_db(
         conversation_id,
         conversation_data["profile"],
@@ -816,7 +821,85 @@ async def upload_file(
         conversation_data.get("title", "Untitled Chat")
     )
 
-    return {"status": "ok", "summary": summary}
+    return {
+        "status": "ok",
+        "summary": summary,
+        "id": attachment_id,
+        "filename": file.filename,
+    }
+
+
+@app.get("/conversations/{conversation_id}/attachments", tags=["AI Tutor Core"])
+async def list_conversation_attachments(
+    conversation_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """List file summaries attached to a general-chat conversation."""
+    conversation_id = validate_safe_string(conversation_id, "conversation_id")
+    try:
+        conv_history_obj = get_conversation_history(user_id, conversation_id)
+        if conv_history_obj is None:
+            raise HTTPException(status_code=404, detail="Conversation not found or access denied.")
+        conversation_data = SESSIONS[user_id][conversation_id]
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"Redis connection error: {e}")
+
+    attachments = []
+    for idx, item in enumerate(conversation_data.get("summaries") or []):
+        if not isinstance(item, dict):
+            continue
+        attachments.append({
+            "id": item.get("id") or f"idx-{idx}",
+            "filename": item.get("filename") or f"file-{idx + 1}",
+            "summary": item.get("summary"),
+            "index": idx,
+        })
+    return {"attachments": attachments, "conversation_id": conversation_id}
+
+
+@app.delete("/conversations/{conversation_id}/attachments/{attachment_id}", tags=["AI Tutor Core"])
+async def delete_conversation_attachment(
+    conversation_id: str,
+    attachment_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Remove one attached file summary from a general-chat conversation."""
+    conversation_id = validate_safe_string(conversation_id, "conversation_id")
+    attachment_id = validate_safe_string(attachment_id, "attachment_id")
+    try:
+        conv_history_obj = get_conversation_history(user_id, conversation_id)
+        if conv_history_obj is None:
+            raise HTTPException(status_code=404, detail="Conversation not found or access denied.")
+        conversation_data = SESSIONS[user_id][conversation_id]
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"Redis connection error: {e}")
+
+    summaries = list(conversation_data.get("summaries") or [])
+    remove_at = None
+    for idx, item in enumerate(summaries):
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id") or f"idx-{idx}"
+        if item_id == attachment_id or str(idx) == attachment_id:
+            remove_at = idx
+            break
+    if remove_at is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    removed = summaries.pop(remove_at)
+    conversation_data["summaries"] = summaries
+    save_conversation_data_to_db(
+        conversation_id,
+        conversation_data["profile"],
+        conversation_data["summaries"],
+        conversation_data.get("title", "Untitled Chat"),
+    )
+    return {
+        "deleted": True,
+        "id": removed.get("id") if isinstance(removed, dict) else attachment_id,
+        "filename": removed.get("filename") if isinstance(removed, dict) else None,
+        "conversation_id": conversation_id,
+    }
 
 
 # =============================================================================

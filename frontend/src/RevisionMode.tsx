@@ -161,14 +161,21 @@ export const RevisionMode: React.FC<RevisionModeProps> = ({ userId }) => {
           {questions.map((q, idx) => (
             <div key={q.id} className="question-card">
               <span className="q-badge">{q.type.toUpperCase()}</span>
-              <p className="q-text">{idx + 1}. {q.text}</p>
+              <div className="q-text">
+                <span>{idx + 1}. </span>
+                <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
+                  {q.text}
+                </ReactMarkdown>
+              </div>
               {q.type === 'mcq' ? (
                 <div className="options-grid">
                   {q.options?.map(opt => (
                     <label key={opt} className={`option-label ${answers[q.id] === opt ? 'active' : ''}`}>
                       <input type="radio" name={q.id} value={opt} checked={answers[q.id] === opt}
                         onChange={e => setAnswers({ ...answers, [q.id]: e.target.value })} />
-                      {opt}
+                      <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
+                        {opt}
+                      </ReactMarkdown>
                     </label>
                   ))}
                 </div>

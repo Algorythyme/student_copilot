@@ -21,6 +21,14 @@ interface Profile {
 interface Message {
   role: 'user' | 'assistant';
   content: string;
+  attachmentName?: string;
+}
+
+interface SessionAttachment {
+  id: string;
+  filename: string;
+  summary?: string;
+  index?: number;
 }
 
 interface ConversationEntry {
@@ -77,8 +85,11 @@ function App() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [attachments, setAttachments] = useState<SessionAttachment[]>([]);
   const [activeSubject, setActiveSubject] = useState('');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const replaceTargetRef = useRef<string | null>(null);
+  const replaceInputRef = useRef<HTMLInputElement>(null);
 
   // Chat history sidebar
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -93,6 +104,35 @@ function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  const fetchAttachments = useCallback(async (targetConvId: string | null) => {
+    if (!currentUser || !targetConvId || targetConvId.startsWith('notebook_temp_')) {
+      setAttachments([]);
+      return;
+    }
+    try {
+      const headers = await authHeaders(currentUser);
+      const res = await fetch(`${API_BASE}/conversations/${targetConvId}/attachments`, { headers });
+      checkAuthExpiry(res);
+      if (!res.ok) {
+        setAttachments([]);
+        return;
+      }
+      const data = await res.json();
+      setAttachments(Array.isArray(data.attachments) ? data.attachments : []);
+    } catch (err) {
+      log.error('Failed to load attachments', { message: getErrorMessage(err, 'Unknown error') });
+      setAttachments([]);
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!activeSubject.trim()) {
+      void fetchAttachments(convId);
+    } else {
+      setAttachments([]);
+    }
+  }, [convId, activeSubject, fetchAttachments]);
 
   // Auto-dismiss toast
   useEffect(() => {
@@ -219,10 +259,36 @@ function App() {
       syncLearningProfile(convId);
     }
     setMessages([]);
+    setAttachments([]);
     setConvId(null);
     setActiveSubject('');
     setSidebarOpen(false);
     // New conversation will be created by useEffect
+  };
+
+  const handleRemoveAttachment = async (attachmentId: string) => {
+    if (!currentUser || !convId) return;
+    try {
+      const headers = await authHeaders(currentUser);
+      const res = await fetch(
+        `${API_BASE}/conversations/${convId}/attachments/${encodeURIComponent(attachmentId)}`,
+        { method: 'DELETE', headers }
+      );
+      checkAuthExpiry(res);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      setAttachments(prev => prev.filter(a => a.id !== attachmentId));
+      setToast({ message: 'Attachment removed.', type: 'success' });
+    } catch (err: unknown) {
+      setToast({ message: getErrorMessage(err, 'Could not remove attachment'), type: 'error' });
+    }
+  };
+
+  const handleReplaceAttachment = (attachmentId: string) => {
+    replaceTargetRef.current = attachmentId;
+    replaceInputRef.current?.click();
   };
 
   // Resume a prior conversation
@@ -260,6 +326,7 @@ function App() {
       setConvId(targetConvId);
       setActiveSubject('');
       setSidebarOpen(false);
+      await fetchAttachments(targetConvId);
       log.info('Resumed conversation', { messageCount: loadedMessages.length });
     } catch (err: unknown) {
       log.error('Failed to resume conversation', { message: getErrorMessage(err, 'Unknown error') });
@@ -318,6 +385,8 @@ function App() {
     if (!e.target.files?.[0]) return;
     const selectedFile = e.target.files[0];
     const isNotebook = !!activeSubject.trim();
+    const replaceId = replaceTargetRef.current;
+    replaceTargetRef.current = null;
 
     if (!isNotebook && !convId) return;
     setUploading(true);
@@ -330,6 +399,14 @@ function App() {
     }
 
     try {
+      if (!isNotebook && replaceId && convId) {
+        const headers = await authHeaders(currentUser!);
+        await fetch(
+          `${API_BASE}/conversations/${convId}/attachments/${encodeURIComponent(replaceId)}`,
+          { method: 'DELETE', headers }
+        );
+      }
+
       const endpoint = isNotebook
         ? `${API_BASE}/notebook/upload`
         : `${API_BASE}/upload?conversation_id=${convId}`;
@@ -340,9 +417,23 @@ function App() {
       if (isNotebook && data.chunks) {
         log.info('Notebook upload processed', { chunks: Number(data.chunks) || 0 });
         setToast({ message: `${selectedFile.name} processed — ${data.chunks} study sections created.`, type: 'success' });
-      } else if (data.summary) {
+      } else if (data.summary || data.id) {
         log.info('Chat upload processed', { hasSummary: true });
-        setToast({ message: `File uploaded successfully.`, type: 'success' });
+        setMessages(prev => [
+          ...prev,
+          { role: 'user', content: selectedFile.name, attachmentName: selectedFile.name },
+          {
+            role: 'assistant',
+            content: replaceId
+              ? `I've replaced the previous file with "${selectedFile.name}". Ask me about it when you're ready.`
+              : `I've received "${selectedFile.name}". Ask me a question about it when you're ready.`,
+          },
+        ]);
+        await fetchAttachments(convId);
+        setToast({
+          message: replaceId ? 'Attachment replaced.' : 'File uploaded successfully.',
+          type: 'success',
+        });
       }
     } catch (err) {
       log.error('Upload failed', { isNotebook, message: getErrorMessage(err, 'Unknown error') });
@@ -456,6 +547,34 @@ function App() {
                 </span>
               </div>
 
+              {!isNotebookMode && attachments.length > 0 && (
+                <div className="attachment-chip-row">
+                  {attachments.map(file => (
+                    <div key={file.id} className="attachment-chip" title={file.summary || file.filename}>
+                      <span className="attachment-chip-name">📎 {file.filename}</span>
+                      <button
+                        type="button"
+                        className="attachment-chip-btn"
+                        title="Replace"
+                        disabled={uploading}
+                        onClick={() => handleReplaceAttachment(file.id)}
+                      >
+                        ↻
+                      </button>
+                      <button
+                        type="button"
+                        className="attachment-chip-btn danger"
+                        title="Remove"
+                        disabled={uploading}
+                        onClick={() => void handleRemoveAttachment(file.id)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* Messages */}
               <div className="chat-messages">
                 {messages.length === 0 && (
@@ -470,7 +589,12 @@ function App() {
                 )}
                 {messages.map((m, i) => (
                   <div key={i} className={`message ${m.role}`}>
-                    {m.role === 'user' ? m.content : (
+                    {m.attachmentName ? (
+                      <span className="attachment-chip inline">📎 {m.attachmentName}</span>
+                    ) : null}
+                    {m.role === 'user' ? (
+                      m.attachmentName ? null : m.content
+                    ) : (
                       <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
                         {m.content}
                       </ReactMarkdown>
@@ -489,6 +613,13 @@ function App() {
                   {uploading ? '⏳' : '📎'}
                   <input type="file" onChange={handleUpload} disabled={uploading || (!isNotebookMode && !convId)} />
                 </div>
+                <input
+                  ref={replaceInputRef}
+                  type="file"
+                  style={{ display: 'none' }}
+                  onChange={handleUpload}
+                  disabled={uploading || (!isNotebookMode && !convId)}
+                />
                 <input
                   type="text"
                   placeholder="Ask me anything..."

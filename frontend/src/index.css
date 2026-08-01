@@ -477,6 +477,51 @@ h1, h2, h3, h4 { font-weight: 600; letter-spacing: -0.02em; }
   cursor: pointer;
 }
 
+.attachment-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem 0;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  padding: 0.3rem 0.55rem;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-hover);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+.attachment-chip.inline {
+  margin-bottom: 0.35rem;
+}
+
+.attachment-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.attachment-chip-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0 0.15rem;
+}
+
+.attachment-chip-btn:hover { color: var(--accent-light); }
+.attachment-chip-btn.danger:hover { color: var(--error); }
+.attachment-chip-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
 /* ─── Auth Screen ──────────────────────────────────────────── */
 .auth-page {
   height: 100vh;

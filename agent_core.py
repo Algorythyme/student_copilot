@@ -8,6 +8,8 @@
 # Solution: Manual tool-calling loop via RunnableLambda. Full control,
 # zero volatility, proper prompt rendering, complete tool execution.
 
+import re
+
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -26,11 +28,12 @@ You are a friendly and knowledgeable AI tutor designed to answer children's ques
 
 **How to Answer:**
 1.  **Student Context:** Tailor your language, examples, and depth to the `user_profile` (age, country, class). Default to an elementary school level if no profile is provided.
-2.  **File Summaries:** If the user references an uploaded document, prioritize its summary from `{file_summaries}`. Cite the filename when relevant.
-3.  **Web Search:** If you lack information, need current data, or the topic is time-sensitive, use the `tavily_search` tool. Synthesize results into a clear, child-friendly answer and include relevant source URLs.
+2.  **File Summaries:** If the user references an uploaded document, prioritize its summary from `{file_summaries}`.
+3.  **Web Search:** If you lack information, need current data, or the topic is time-sensitive, use the `tavily_search` tool. Synthesize results into a clear, child-friendly answer.
 4.  **Direct Answer:** Otherwise, answer directly from your knowledge base or conversation history.
 5.  **Clarity & Conciseness:** Use simple words and concepts. Avoid jargon or explain it clearly. Be concise, but expand if a deeper explanation genuinely aids understanding.
-6.  **Safety:** Ensure all answers are safe, appropriate for children, and avoid harmful/inappropriate content. You may recommend further safe reading or resources.
+6.  **Safety:** Ensure all answers are safe, appropriate for children, and avoid harmful/inappropriate content.
+7.  **No Inline Citations:** NEVER include citations, URLs, links, filenames, footnotes, or source references (e.g. "[source]", "according to example.com", "(see chapter 3 of ...)") in your reply body. The app displays sources separately below your answer.
 
 **Current Context:**
 - User Profile: `{user_profile}`
@@ -48,6 +51,19 @@ _prompt = ChatPromptTemplate.from_messages([
 _llm_with_tools = llm.bind_tools(tools) if tools else llm
 _tool_map: Dict[str, Any] = {t.name: t for t in tools} if tools else {}
 _MAX_TOOL_ITERATIONS = 5
+
+_URL_RE = re.compile(r"https?://[^\s\"'<>\\)\]}]+")
+_MAX_WEB_SOURCES = 5
+
+
+def _collect_source_urls(tool_result: Any, sources: List[str]) -> None:
+    """Extract web URLs from a tool result so Nest can surface them as sources."""
+    for url in _URL_RE.findall(str(tool_result)):
+        if len(sources) >= _MAX_WEB_SOURCES:
+            return
+        cleaned = url.rstrip(".,;")
+        if cleaned not in sources:
+            sources.append(cleaned)
 
 
 async def _sovereign_agent(input_dict: dict, config=None) -> dict:
@@ -67,6 +83,7 @@ async def _sovereign_agent(input_dict: dict, config=None) -> dict:
 
     # 2. Tool-calling loop (bounded)
     response = None
+    sources: List[str] = []
     for iteration in range(_MAX_TOOL_ITERATIONS):
         response = await _llm_with_tools.ainvoke(messages, config=config)
         messages.append(response)
@@ -81,6 +98,7 @@ async def _sovereign_agent(input_dict: dict, config=None) -> dict:
             if tool_fn:
                 try:
                     result = await tool_fn.ainvoke(tc["args"])
+                    _collect_source_urls(result, sources)
                 except Exception as e:
                     logger.error(f"[agent_core] Tool '{tc['name']}' error: {e}")
                     result = f"Tool execution failed: {e}"
@@ -96,7 +114,7 @@ async def _sovereign_agent(input_dict: dict, config=None) -> dict:
     if not output:
         output = "I couldn't generate a response. Please try again."
 
-    return {"output": output}
+    return {"output": output, "sources": sources}
 
 
 agent_executor = RunnableLambda(_sovereign_agent)
@@ -150,10 +168,14 @@ def _chunk_text(content: Any) -> str:
     return str(content)
 
 
-async def run_agent_inline_stream(input_dict: dict) -> AsyncIterator[str]:
+async def run_agent_inline_stream(
+    input_dict: dict,
+    sources_out: Optional[List[str]] = None,
+) -> AsyncIterator[str]:
     """
     Same sovereign agent as run_agent_inline, but yields final-answer tokens via SSE.
     Tool-call turns are buffered (not streamed) so partial tool scratch is never shown.
+    Web-search URLs are appended to `sources_out` (if provided) for the done payload.
     """
     rendered = _prompt.invoke({
         "input": input_dict.get("input", ""),
@@ -201,6 +223,8 @@ async def run_agent_inline_stream(input_dict: dict) -> AsyncIterator[str]:
             if tool_fn:
                 try:
                     result = await tool_fn.ainvoke(tc["args"])
+                    if sources_out is not None:
+                        _collect_source_urls(result, sources_out)
                 except Exception as e:
                     logger.error(f"[agent_core] Tool '{tc['name']}' error: {e}")
                     result = f"Tool execution failed: {e}"

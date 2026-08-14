@@ -90,13 +90,24 @@ async def compute_chat(payload: ComputeChatRequest) -> Dict[str, Any]:
     input_dict = _build_chat_input(payload)
     result = await run_agent_inline(input_dict)
     reply = result.get("output", "I'm sorry, I couldn't process that request.")
-    return {"reply": reply, "learning_method_suggestion": None}
+    return {
+        "reply": reply,
+        "learning_method_suggestion": None,
+        "sources": result.get("sources") or [],
+    }
 
 
-async def compute_chat_stream(payload: ComputeChatRequest) -> AsyncIterator[str]:
-    """Yield plain-text reply tokens for SSE proxying by Nest."""
+async def compute_chat_stream(
+    payload: ComputeChatRequest,
+    sources_out: Optional[List[str]] = None,
+) -> AsyncIterator[str]:
+    """Yield plain-text reply tokens for SSE proxying by Nest.
+
+    Web-search URLs are appended to `sources_out` (if provided) so the caller
+    can include them in the SSE done payload.
+    """
     input_dict = _build_chat_input(payload)
-    async for token in run_agent_inline_stream(input_dict):
+    async for token in run_agent_inline_stream(input_dict, sources_out=sources_out):
         if token:
             yield token
 

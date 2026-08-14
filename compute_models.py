@@ -52,6 +52,8 @@ class ComputeChatRequest(BaseModel):
 class ComputeChatResponse(BaseModel):
     reply: str
     learning_method_suggestion: Optional[str] = None
+    # Web URLs used by the agent (Nest merges them into the done-event sources).
+    sources: List[str] = Field(default_factory=list)
 
 
 class ComputeRevisionGenerateRequest(BaseModel):

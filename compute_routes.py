@@ -88,7 +88,7 @@ async def compute_chat_stream(
 ) -> StreamingResponse:
     """
     SSE chat stream for Nest proxy.
-    Events: token {text}, done {reply}, error {detail}
+    Events: token {text}, done {reply, sources}, error {detail}
     """
     logger.info(
         "[compute] chat/stream started user=%s school=%s history_len=%d chunks=%d",
@@ -101,12 +101,13 @@ async def compute_chat_stream(
 
     async def event_stream():
         parts: list[str] = []
+        sources: list[str] = []
         try:
-            async for token in compute_service.compute_chat_stream(payload):
+            async for token in compute_service.compute_chat_stream(payload, sources_out=sources):
                 parts.append(token)
                 yield f"data: {json.dumps({'type': 'token', 'text': token}, ensure_ascii=False)}\n\n"
             reply = "".join(parts).strip() or "I'm sorry, I couldn't process that request."
-            yield f"data: {json.dumps({'type': 'done', 'reply': reply}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'reply': reply, 'sources': sources}, ensure_ascii=False)}\n\n"
             logger.info(
                 "[compute] chat/stream completed in %.1fs (user=%s school=%s)",
                 time.monotonic() - started,

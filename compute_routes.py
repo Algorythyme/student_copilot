@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 import compute_service
+from agent_core import WebSearchRequiredError
 from compute_models import (
     ComputeChatRequest,
     ComputeChatResponse,
@@ -38,6 +39,12 @@ async def _run_compute(
     started = time.monotonic()
     try:
         result = await coro
+    except WebSearchRequiredError as exc:
+        logger.warning(
+            "[compute] %s unavailable after %.1fs (user=%s search_failed=true)",
+            action, time.monotonic() - started, identity.user_id,
+        )
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         logger.warning(
             "[compute] %s rejected after %.1fs (user=%s): %s",
@@ -53,8 +60,10 @@ async def _run_compute(
         raise HTTPException(status_code=500, detail=failure_detail) from exc
 
     logger.info(
-        "[compute] %s completed in %.1fs (user=%s school=%s)",
+        "[compute] %s completed in %.1fs (user=%s school=%s search_used=%s search_failed=%s)",
         action, time.monotonic() - started, identity.user_id, identity.school_id,
+        bool(result.get("search_used")),
+        bool(result.get("search_failed")),
     )
     return result
 
@@ -88,7 +97,7 @@ async def compute_chat_stream(
 ) -> StreamingResponse:
     """
     SSE chat stream for Nest proxy.
-    Events: token {text}, done {reply, sources}, error {detail}
+    Events: token {text}, done {reply, search_used, search_failed}, error {detail}
     """
     logger.info(
         "[compute] chat/stream started user=%s school=%s history_len=%d chunks=%d",
@@ -101,19 +110,31 @@ async def compute_chat_stream(
 
     async def event_stream():
         parts: list[str] = []
-        sources: list[str] = []
+        metadata = {"search_used": False, "search_failed": False}
         try:
-            async for token in compute_service.compute_chat_stream(payload, sources_out=sources):
+            async for token in compute_service.compute_chat_stream(
+                payload, metadata_out=metadata
+            ):
                 parts.append(token)
                 yield f"data: {json.dumps({'type': 'token', 'text': token}, ensure_ascii=False)}\n\n"
             reply = "".join(parts).strip() or "I'm sorry, I couldn't process that request."
-            yield f"data: {json.dumps({'type': 'done', 'reply': reply, 'sources': sources}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'reply': reply, **metadata}, ensure_ascii=False)}\n\n"
             logger.info(
-                "[compute] chat/stream completed in %.1fs (user=%s school=%s)",
+                "[compute] chat/stream completed in %.1fs (user=%s school=%s search_used=%s search_failed=%s)",
                 time.monotonic() - started,
                 identity.user_id,
                 identity.school_id,
+                metadata["search_used"],
+                metadata["search_failed"],
             )
+        except WebSearchRequiredError as exc:
+            metadata["search_failed"] = True
+            logger.warning(
+                "[compute] chat/stream unavailable after %.1fs (user=%s search_failed=true)",
+                time.monotonic() - started,
+                identity.user_id,
+            )
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)}, ensure_ascii=False)}\n\n"
         except ValueError as exc:
             logger.warning(
                 "[compute] chat/stream rejected after %.1fs (user=%s): %s",

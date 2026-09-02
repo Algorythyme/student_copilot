@@ -38,7 +38,7 @@ from session_manager import (
     create_new_conversation_id, get_user_conversation_ids, delete_conversation,
     load_user_learning_method, save_user_learning_method
 )
-from agent_core import with_message_history
+from agent_core import sanitize_public_reply, with_message_history
 from file_utils import process_uploaded_file
 from ai_summarizer import generate_conversation_title
 
@@ -246,8 +246,13 @@ async def root():
 
 @app.get("/health")
 async def health_check() -> Dict[str, str]:
+    web_search = "configured" if config.TAVILY_KEY else "disabled"
     if config.IS_COMPUTE_MODE:
-        return {"status": "ok", "mode": config.DEPLOY_MODE}
+        return {
+            "status": "ok",
+            "mode": config.DEPLOY_MODE,
+            "web_search": web_search,
+        }
 
     from session_manager import redis_client as r
     from db.connection import db_connection
@@ -259,7 +264,12 @@ async def health_check() -> Dict[str, str]:
             with db_connection() as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT 1")
-        return {"status": "ok", "mode": config.DEPLOY_MODE, "db_backend": "postgres"}
+        return {
+            "status": "ok",
+            "mode": config.DEPLOY_MODE,
+            "db_backend": "postgres",
+            "web_search": web_search,
+        }
     except Exception as e:
         logger.error(f"[health] Health check failed: {e}")
         raise HTTPException(status_code=503, detail="Health check failed")
@@ -997,7 +1007,8 @@ async def chat(
         input_dict = {
             "input": req.message,
             "user_profile": profile_text,
-            "file_summaries": file_summaries_text
+            "file_summaries": file_summaries_text,
+            "has_private_context": bool(conversation_data["summaries"]),
         }
         response = await with_message_history.ainvoke(
             input_dict,
@@ -1403,10 +1414,7 @@ async def notebook_ask(
         chain = prompt | llm | StrOutputParser()
         answer = await chain.ainvoke({"context": context, "question": req.question})
 
-        return {
-            "answer": answer.strip(),
-            "context_sources": list(set([doc.metadata.get("source") for doc in docs]))
-        }
+        return {"answer": sanitize_public_reply(answer)}
     except Exception as e:
         logger.error(f"[notebook] Ask failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

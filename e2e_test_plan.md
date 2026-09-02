@@ -121,7 +121,7 @@
 | 9.4 | Check Supabase → `parent_chunks` table | New rows with `owner_id=test_student`, `role=student`, `source=<filename>` |
 | 9.5 | Ask: `"What is mitosis?"` | Answer drawn **strictly from uploaded context** (ground truth, no hallucination) |
 | 9.6 | Ask about something NOT in the document | Response: `"I cannot find this in your provided context."` |
-| 9.7 | Verify response includes `context_sources` | Source filename visible in response |
+| 9.7 | Inspect response payload | No source filename, URL, `sources`, or `context_sources` is exposed |
 
 ---
 

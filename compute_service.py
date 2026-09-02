@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
-from agent_core import run_agent_inline, run_agent_inline_stream
+from agent_core import run_agent_inline, run_agent_inline_stream, sanitize_public_reply
 from ai_summarizer import evaluate_session_learning_method
 from compute_models import (
     ComputeChatRequest,
@@ -23,6 +23,7 @@ from compute_models import (
 )
 from config import logger
 from llm_setup import llm
+from privacy_utils import public_chat_result
 
 
 def _format_user_profile(profile: Optional[UserProfilePayload]) -> str:
@@ -37,13 +38,19 @@ def _format_user_profile(profile: Optional[UserProfilePayload]) -> str:
 def _format_file_summaries(summaries: List[FileSummaryItem]) -> str:
     if not summaries:
         return "no uploaded file summaries"
-    return "\n".join(f"{item.filename}: {item.summary}" for item in summaries)
+    return "\n".join(
+        f"Uploaded material {index + 1}: {item.summary}"
+        for index, item in enumerate(summaries)
+    )
 
 
 def _format_context_chunks(chunks: List[ContextChunk]) -> str:
     if not chunks:
         return ""
-    parts = [f"[{chunk.source}]\n{chunk.content}" for chunk in chunks]
+    parts = [
+        f"[Study material {index + 1}]\n{chunk.content}"
+        for index, chunk in enumerate(chunks)
+    ]
     return "Retrieved context from SMS vector search:\n" + "\n\n---\n\n".join(parts)
 
 
@@ -64,7 +71,10 @@ def _build_context_text(chunks: List[ContextChunk]) -> str:
         return ""
     if len(chunks) == 1:
         return chunks[0].content
-    parent_texts = [f"[{c.source}]\n{c.content}" for c in chunks]
+    parent_texts = [
+        f"[Study material {index + 1}]\n{chunk.content}"
+        for index, chunk in enumerate(chunks)
+    ]
     return "\n\n---\n\n".join(parent_texts)
 
 
@@ -83,31 +93,23 @@ def _build_chat_input(payload: ComputeChatRequest) -> Dict[str, Any]:
         "user_profile": profile_text,
         "file_summaries": combined_context or "no uploaded file summaries",
         "chat_history": _history_to_langchain(history),
+        "has_private_context": bool(payload.context_chunks or payload.file_summaries),
     }
 
 
 async def compute_chat(payload: ComputeChatRequest) -> Dict[str, Any]:
     input_dict = _build_chat_input(payload)
     result = await run_agent_inline(input_dict)
-    reply = result.get("output", "I'm sorry, I couldn't process that request.")
-    return {
-        "reply": reply,
-        "learning_method_suggestion": None,
-        "sources": result.get("sources") or [],
-    }
+    return public_chat_result(result)
 
 
 async def compute_chat_stream(
     payload: ComputeChatRequest,
-    sources_out: Optional[List[str]] = None,
+    metadata_out: Optional[Dict[str, bool]] = None,
 ) -> AsyncIterator[str]:
-    """Yield plain-text reply tokens for SSE proxying by Nest.
-
-    Web-search URLs are appended to `sources_out` (if provided) so the caller
-    can include them in the SSE done payload.
-    """
+    """Yield only sanitized final-answer text for SSE proxying by Nest."""
     input_dict = _build_chat_input(payload)
-    async for token in run_agent_inline_stream(input_dict, sources_out=sources_out):
+    async for token in run_agent_inline_stream(input_dict, metadata_out=metadata_out):
         if token:
             yield token
 
@@ -174,13 +176,15 @@ async def compute_revision_evaluate(payload: ComputeRevisionEvaluateRequest) -> 
         "questions": json.dumps(payload.questions),
         "answers": json.dumps(payload.answers),
     })
-    feedback_text = result.content if hasattr(result, "content") else str(result)
+    feedback_text = sanitize_public_reply(
+        result.content if hasattr(result, "content") else str(result)
+    )
     return {"feedback": feedback_text, "status": "evaluated"}
 
 
 async def compute_summarize(payload: ComputeSummarizeRequest) -> Dict[str, Any]:
     clipped = payload.text[:16000]
-    label = payload.filename or "document"
+    label = "uploaded document"
 
     summary_prompt = ChatPromptTemplate.from_messages([
         (
@@ -196,7 +200,7 @@ async def compute_summarize(payload: ComputeSummarizeRequest) -> Dict[str, Any]:
     chain = summary_prompt | llm | StrOutputParser()
     summary = await chain.ainvoke({"filename": label, "document_content": clipped})
     logger.info("[compute_service] Generated summary for %s", label)
-    return {"summary": summary.strip()}
+    return {"summary": sanitize_public_reply(summary)}
 
 
 async def compute_evaluate_session(payload: ComputeEvaluateSessionRequest) -> Dict[str, Any]:

@@ -16,6 +16,8 @@ Deploy as **compute-only** for SMS integration.
 6. Deploy → `GET /health`
 7. Set backend `STUDENT_COPILOT_COMPUTE_URL` → redeploy backend
 
+`GET /health` reports `web_search` as `configured` or `disabled`; it never exposes `TAVILY_API_KEY`.
+
 ---
 
 ## Required env (compute)

@@ -9,7 +9,7 @@ This document describes how the Pedagic SMS Nest backend integrates with the **c
 | **SMS (Nest)** | Users, sessions, **all RAG** (pgvector on Prisma Postgres), approved-artifact ingest, persistence |
 | **Copilot (compute)** | JWT verification, LLM inference, structured JSON responses (no DB writes) |
 
-Copilot is **stateless**: every request must include full context in the body. SMS supplies **`context_chunks`** from approved Teacher Copilot artifacts (`AiLessonNote`, `AiHandout`) only — not uploads, not user-type KBs, not Pinecone/Supabase in compute mode.
+Copilot is **stateless**: every request must include full context in the body. SMS supplies **`context_chunks`** from approved, student-safe artifacts only. Source labels are generic; resolved titles remain private in SMS metadata.
 
 ## Authentication
 
@@ -63,7 +63,7 @@ One chat turn with full history and RAG context from SMS.
     { "role": "assistant", "content": "A cell is..." }
   ],
   "context_chunks": [
-    { "source": "Biology Syllabus", "content": "Photosynthesis converts light..." }
+    { "source": "Study material 1", "content": "Photosynthesis converts light..." }
   ]
 }
 ```
@@ -75,7 +75,9 @@ One chat turn with full history and RAG context from SMS.
 ```json
 {
   "reply": "Photosynthesis is the process...",
-  "learning_method_suggestion": null
+  "learning_method_suggestion": null,
+  "search_used": true,
+  "search_failed": false
 }
 ```
 
@@ -93,7 +95,7 @@ Generate an exam from SMS-retrieved context.
   "mcq_count": 5,
   "theory_count": 2,
   "context_chunks": [
-    { "source": "Teacher Notes", "content": "..." }
+    { "source": "Study material 1", "content": "..." }
   ],
   "user_profile": {
     "learning_method": "visual analogies"
@@ -129,7 +131,7 @@ Grade student answers against ground-truth context.
   "class_id": "SSS 1",
   "questions": [ { "id": "q1", "type": "mcq", "text": "...", "correct_answer": "B" } ],
   "answers": { "q1": "A" },
-  "context_chunks": [ { "source": "Teacher Notes", "content": "..." } ],
+  "context_chunks": [ { "source": "Study material 1", "content": "..." } ],
   "user_profile": { "learning_method": "visual analogies" }
 }
 ```
@@ -214,7 +216,7 @@ SMS may retry failed requests. Copilot compute endpoints have **no side effects*
 
 ```
 GET /health
-→ { "status": "ok", "mode": "compute" }
+→ { "status": "ok", "mode": "compute", "web_search": "configured" }
 ```
 
 No Postgres or Pinecone ping in compute mode.

@@ -24,9 +24,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AI_Tutor_App")
 
-# Load .env
-project_dir = pathlib.Path.cwd()
-logger.info(f"[startup] cwd={project_dir}")
+# Load .env relative to this repository, independent of process cwd.
+project_dir = pathlib.Path(__file__).resolve().parent
+logger.info("[startup] project_dir=%s", project_dir)
 load_dotenv(dotenv_path=project_dir / ".env")
 
 # --- Read Environment Variables ---
@@ -272,10 +272,10 @@ if not TAVILY_KEY:
     if REQUIRE_WEB_SEARCH:
         logger.error(
             "ERROR: TAVILY_API_KEY is required when REQUIRE_WEB_SEARCH=true. "
-            "Refusing to start without the advertised web-search capability."
+            "Required search turns will return 503 until it is configured."
         )
-        sys.exit(1)
-    logger.warning("WARNING: TAVILY_API_KEY not set. Tavily web search is disabled.")
+    else:
+        logger.warning("WARNING: TAVILY_API_KEY not set. Tavily web search is disabled.")
 
 if not PINECONE_API_KEY:
     if IS_COMPUTE_MODE:

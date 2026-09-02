@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from tavily import TavilyClient
 
 from config import TAVILY_KEY, logger
+from privacy_utils import sanitize_web_results
 
 
 class TavilySearchArgs(BaseModel):
@@ -29,8 +30,7 @@ def _tavily_search(query: str, include_domains: Optional[List[str]] = None, excl
         include_domains=include_domains,
         exclude_domains=exclude_domains,
     )
-    results = resp.get("results") if isinstance(resp, dict) else None
-    return results or []
+    return sanitize_web_results(resp)
 
 
 async def _tavily_search_async(query: str, include_domains: Optional[List[str]] = None, exclude_domains: Optional[List[str]] = None):
@@ -44,7 +44,7 @@ tavily_tool = (
         func=_tavily_search,
         coroutine=_tavily_search_async,
         name="tavily_search",
-        description="Search the web for current information and return a list of results with URLs.",
+        description="Search the web for current information and return sanitized result text.",
         args_schema=TavilySearchArgs,
     )
     if TAVILY_KEY

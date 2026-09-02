@@ -8,8 +8,6 @@
 # Solution: Manual tool-calling loop via RunnableLambda. Full control,
 # zero volatility, proper prompt rendering, complete tool execution.
 
-import re
-
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -18,9 +16,14 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from llm_setup import llm
-from tools_setup import tools
+from tools_setup import tavily_tool, tools
 from session_manager import get_conversation_history, SESSIONS
-from config import logger
+from config import logger, REQUIRE_WEB_SEARCH
+from privacy_utils import (
+    WebSearchRequiredError,
+    run_required_web_search,
+    sanitize_public_reply,
+)
 
 # ─── SYSTEM PROMPT ──────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """\
@@ -29,7 +32,7 @@ You are a friendly and knowledgeable AI tutor designed to answer children's ques
 **How to Answer:**
 1.  **Student Context:** Tailor your language, examples, and depth to the `user_profile` (age, country, class). Default to an elementary school level if no profile is provided.
 2.  **File Summaries:** If the user references an uploaded document, prioritize its summary from `{file_summaries}`.
-3.  **Web Search:** If you lack information, need current data, or the topic is time-sensitive, use the `tavily_search` tool. Synthesize results into a clear, child-friendly answer.
+3.  **Web Search:** When sanitized web context is provided, use it to answer current or general-knowledge questions.
 4.  **Direct Answer:** Otherwise, answer directly from your knowledge base or conversation history.
 5.  **Clarity & Conciseness:** Use simple words and concepts. Avoid jargon or explain it clearly. Be concise, but expand if a deeper explanation genuinely aids understanding.
 6.  **Safety:** Ensure all answers are safe, appropriate for children, and avoid harmful/inappropriate content.
@@ -37,7 +40,8 @@ You are a friendly and knowledgeable AI tutor designed to answer children's ques
 
 **Current Context:**
 - User Profile: `{user_profile}`
-- Uploaded Summaries: `{file_summaries}`\
+- Uploaded Summaries: `{file_summaries}`
+- Sanitized Web Context: `{web_context}`\
 """
 
 # Prompt template: system + history + user input (no agent_scratchpad needed)
@@ -48,22 +52,32 @@ _prompt = ChatPromptTemplate.from_messages([
 ])
 
 # ─── SOVEREIGN TOOL-CALLING LOOP ───────────────────────────────────────────
-_llm_with_tools = llm.bind_tools(tools) if tools else llm
+_llm_with_tools = llm
 _tool_map: Dict[str, Any] = {t.name: t for t in tools} if tools else {}
 _MAX_TOOL_ITERATIONS = 5
 
-_URL_RE = re.compile(r"https?://[^\s\"'<>\\)\]}]+")
-_MAX_WEB_SOURCES = 5
+async def _required_web_context(input_dict: dict) -> tuple[str, bool]:
+    async def search(query: str):
+        if tavily_tool is None:
+            raise WebSearchRequiredError(
+                "Required web search is unavailable. Please try again later."
+            )
+        return await tavily_tool.ainvoke({"query": query})
 
-
-def _collect_source_urls(tool_result: Any, sources: List[str]) -> None:
-    """Extract web URLs from a tool result so Nest can surface them as sources."""
-    for url in _URL_RE.findall(str(tool_result)):
-        if len(sources) >= _MAX_WEB_SOURCES:
-            return
-        cleaned = url.rstrip(".,;")
-        if cleaned not in sources:
-            sources.append(cleaned)
+    try:
+        context, used = await run_required_web_search(
+            input_dict,
+            REQUIRE_WEB_SEARCH,
+            search if tavily_tool is not None else None,
+        )
+    except WebSearchRequiredError:
+        logger.error(
+            "[agent_core] required web search unavailable search_failed=true"
+        )
+        raise
+    if used:
+        logger.info("[agent_core] required web search completed search_used=true")
+    return context, used
 
 
 async def _sovereign_agent(input_dict: dict, config=None) -> dict:
@@ -72,18 +86,20 @@ async def _sovereign_agent(input_dict: dict, config=None) -> dict:
     Renders prompt → calls LLM → executes any tool calls → loops until text response.
     Fully compatible with RunnableWithMessageHistory's dict-based input.
     """
+    web_context, search_used = await _required_web_context(input_dict)
+
     # 1. Render the prompt template into messages
     rendered = _prompt.invoke({
         "input": input_dict.get("input", ""),
         "chat_history": input_dict.get("chat_history", []),
         "user_profile": input_dict.get("user_profile", "no profile provided"),
         "file_summaries": input_dict.get("file_summaries", "no uploaded file summaries"),
+        "web_context": web_context or "none",
     })
     messages = list(rendered.to_messages())
 
     # 2. Tool-calling loop (bounded)
     response = None
-    sources: List[str] = []
     for iteration in range(_MAX_TOOL_ITERATIONS):
         response = await _llm_with_tools.ainvoke(messages, config=config)
         messages.append(response)
@@ -98,14 +114,24 @@ async def _sovereign_agent(input_dict: dict, config=None) -> dict:
             if tool_fn:
                 try:
                     result = await tool_fn.ainvoke(tc["args"])
-                    _collect_source_urls(result, sources)
+                    if tc["name"] == "tavily_search":
+                        search_used = True
                 except Exception as e:
                     logger.error(f"[agent_core] Tool '{tc['name']}' error: {e}")
+                    if REQUIRE_WEB_SEARCH and tc["name"] == "tavily_search":
+                        raise WebSearchRequiredError(
+                            "Required web search failed. Please try again later."
+                        ) from e
                     result = f"Tool execution failed: {e}"
             else:
                 logger.warning(f"[agent_core] Unknown tool requested: {tc['name']}")
                 result = f"Unknown tool: {tc['name']}"
-            messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+            messages.append(
+                ToolMessage(
+                    content=sanitize_public_reply(str(result)),
+                    tool_call_id=tc["id"],
+                )
+            )
 
     # 3. Extract final text output
     output = ""
@@ -114,7 +140,11 @@ async def _sovereign_agent(input_dict: dict, config=None) -> dict:
     if not output:
         output = "I couldn't generate a response. Please try again."
 
-    return {"output": output, "sources": sources}
+    return {
+        "output": sanitize_public_reply(output),
+        "search_used": search_used,
+        "search_failed": False,
+    }
 
 
 agent_executor = RunnableLambda(_sovereign_agent)
@@ -144,6 +174,7 @@ async def run_agent_inline(input_dict: dict) -> dict:
         "user_profile": input_dict.get("user_profile", "no profile provided"),
         "file_summaries": input_dict.get("file_summaries", "no uploaded file summaries"),
         "chat_history": input_dict.get("chat_history") or [],
+        "has_private_context": bool(input_dict.get("has_private_context")),
     }
     return await _sovereign_agent(payload)
 
@@ -170,38 +201,31 @@ def _chunk_text(content: Any) -> str:
 
 async def run_agent_inline_stream(
     input_dict: dict,
-    sources_out: Optional[List[str]] = None,
+    metadata_out: Optional[Dict[str, bool]] = None,
 ) -> AsyncIterator[str]:
     """
-    Same sovereign agent as run_agent_inline, but yields final-answer tokens via SSE.
-    Tool-call turns are buffered (not streamed) so partial tool scratch is never shown.
-    Web-search URLs are appended to `sources_out` (if provided) for the done payload.
+    Run the same agent and emit only the fully sanitized final answer.
+    Buffering prevents a split URL from leaking across token boundaries.
     """
+    web_context, search_used = await _required_web_context(input_dict)
+    if metadata_out is not None:
+        metadata_out.update(search_used=search_used, search_failed=False)
+
     rendered = _prompt.invoke({
         "input": input_dict.get("input", ""),
         "chat_history": input_dict.get("chat_history") or [],
         "user_profile": input_dict.get("user_profile", "no profile provided"),
         "file_summaries": input_dict.get("file_summaries", "no uploaded file summaries"),
+        "web_context": web_context or "none",
     })
     messages = list(rendered.to_messages())
+    final_output = ""
 
     for iteration in range(_MAX_TOOL_ITERATIONS):
         response = None
-        saw_tool_calls = False
-        streamed_any = False
 
         async for chunk in _llm_with_tools.astream(messages):
             response = chunk if response is None else response + chunk
-            tool_bits = getattr(chunk, "tool_call_chunks", None) or getattr(
-                chunk, "tool_calls", None
-            )
-            if tool_bits:
-                saw_tool_calls = True
-            text = _chunk_text(getattr(chunk, "content", None))
-            # Stream only once we know this turn is a plain text answer.
-            if text and not saw_tool_calls and not getattr(response, "tool_calls", None):
-                streamed_any = True
-                yield text
 
         if response is None:
             break
@@ -209,10 +233,7 @@ async def run_agent_inline_stream(
         messages.append(response)
         tool_calls = getattr(response, "tool_calls", None)
         if not tool_calls:
-            if not streamed_any:
-                final = _chunk_text(getattr(response, "content", None))
-                if final:
-                    yield final
+            final_output = _chunk_text(getattr(response, "content", None))
             break
 
         logger.info(
@@ -223,17 +244,34 @@ async def run_agent_inline_stream(
             if tool_fn:
                 try:
                     result = await tool_fn.ainvoke(tc["args"])
-                    if sources_out is not None:
-                        _collect_source_urls(result, sources_out)
+                    if tc["name"] == "tavily_search":
+                        search_used = True
                 except Exception as e:
                     logger.error(f"[agent_core] Tool '{tc['name']}' error: {e}")
-                    result = f"Tool execution failed: {e}"
+                    if metadata_out is not None:
+                        metadata_out["search_failed"] = tc["name"] == "tavily_search"
+                    if REQUIRE_WEB_SEARCH and tc["name"] == "tavily_search":
+                        raise WebSearchRequiredError(
+                            "Required web search failed. Please try again later."
+                        ) from e
+                    result = "Tool execution failed."
             else:
                 logger.warning(f"[agent_core] Unknown tool requested: {tc['name']}")
                 result = f"Unknown tool: {tc['name']}"
-            messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+            messages.append(
+                ToolMessage(
+                    content=sanitize_public_reply(str(result)),
+                    tool_call_id=tc["id"],
+                )
+            )
     else:
-        yield "I couldn't generate a response. Please try again."
+        final_output = "I couldn't generate a response. Please try again."
+
+    if metadata_out is not None:
+        metadata_out["search_used"] = search_used
+    safe_output = sanitize_public_reply(final_output)
+    if safe_output:
+        yield safe_output
 
 
 # --- FIX C1: Direct O(1) lookup instead of O(n) linear scan ---

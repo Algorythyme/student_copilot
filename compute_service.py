@@ -23,7 +23,7 @@ from compute_models import (
 )
 from config import logger
 from llm_setup import llm
-from privacy_utils import public_chat_result
+from privacy_utils import public_chat_result, sanitize_public_data
 
 
 def _format_user_profile(profile: Optional[UserProfilePayload]) -> str:
@@ -93,7 +93,11 @@ def _build_chat_input(payload: ComputeChatRequest) -> Dict[str, Any]:
         "user_profile": profile_text,
         "file_summaries": combined_context or "no uploaded file summaries",
         "chat_history": _history_to_langchain(history),
-        "has_private_context": bool(payload.context_chunks or payload.file_summaries),
+        "has_private_context": bool(
+            payload.context_chunks
+            or payload.file_summaries
+            or payload.message_history
+        ),
     }
 
 
@@ -146,7 +150,7 @@ async def compute_revision_generate(payload: ComputeRevisionGenerateRequest) -> 
     questions = exam.get("questions") if isinstance(exam, dict) else exam
     if not isinstance(questions, list):
         raise ValueError("LLM did not return a valid questions list.")
-    return {"questions": questions}
+    return {"questions": sanitize_public_data(questions)}
 
 
 async def compute_revision_evaluate(payload: ComputeRevisionEvaluateRequest) -> Dict[str, Any]:

@@ -4,6 +4,7 @@ from privacy_utils import (
     WebSearchRequiredError,
     public_chat_result,
     run_required_web_search,
+    sanitize_public_data,
     sanitize_public_reply,
     sanitize_web_results,
 )
@@ -56,7 +57,7 @@ class ComputePrivacyTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(used)
-        self.assertNotIn("child@example.com", queries[0])
+        self.assertEqual(queries, ["What is photosynthesis?"])
         self.assertIn("Web result 1", context)
 
     async def test_required_search_failure_is_controlled(self):
@@ -111,10 +112,32 @@ class ComputePrivacyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(used)
         self.assertFalse(called)
 
+    async def test_general_question_with_private_context_uses_only_user_query(self):
+        queries = []
+
+        async def search(query):
+            queries.append(query)
+            return [{"label": "Web result 1", "content": "A safe fact"}]
+
+        _context, used = await run_required_web_search(
+            {
+                "input": "What is photosynthesis?",
+                "has_private_context": True,
+                "file_summaries": "Private school material",
+            },
+            True,
+            search,
+        )
+
+        self.assertTrue(used)
+        self.assertEqual(queries, ["What is photosynthesis?"])
+
     def test_compute_chat_never_returns_sources_or_urls(self):
         result = public_chat_result(
             {
-                "output": "Answer https://private.example/source",
+                "output": (
+                    "Web result 1 says answer https://private.example/source"
+                ),
                 "sources": ["https://private.example/source"],
                 "search_used": True,
             }
@@ -122,7 +145,26 @@ class ComputePrivacyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("sources", result)
         self.assertNotIn("http", result["reply"])
+        self.assertNotIn("Web result", result["reply"])
         self.assertTrue(result["search_used"])
+
+    def test_public_compute_data_drops_nested_provenance(self):
+        result = sanitize_public_data(
+            {
+                "questions": [
+                    {
+                        "text": "See Study material 1 at https://example.com",
+                        "sourceTitle": "Private title",
+                        "citations": ["Private title"],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(
+            result,
+            {"questions": [{"text": "See the provided information at"}]},
+        )
 
 
 if __name__ == "__main__":

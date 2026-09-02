@@ -38,7 +38,11 @@ from session_manager import (
     create_new_conversation_id, get_user_conversation_ids, delete_conversation,
     load_user_learning_method, save_user_learning_method
 )
-from agent_core import sanitize_public_reply, with_message_history
+from agent_core import (
+    WebSearchRequiredError,
+    sanitize_public_reply,
+    with_message_history,
+)
 from file_utils import process_uploaded_file
 from ai_summarizer import generate_conversation_title
 
@@ -1016,6 +1020,9 @@ async def chat(
         )
         reply = response.get("output", "I'm sorry, I couldn't process that request.")
         return {"status": "ok", "reply": reply}
+    except WebSearchRequiredError as e:
+        logger.warning("[main] Required web search unavailable search_failed=true")
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except Exception as e:
         logger.error(f"[main] Agent execution error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error during chat processing.")

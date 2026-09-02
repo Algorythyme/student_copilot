@@ -21,8 +21,10 @@ from session_manager import get_conversation_history, SESSIONS
 from config import logger, REQUIRE_WEB_SEARCH
 from privacy_utils import (
     WebSearchRequiredError,
+    requires_deterministic_search,
     run_required_web_search,
     sanitize_public_reply,
+    sanitize_search_query,
 )
 
 # ─── SYSTEM PROMPT ──────────────────────────────────────────────────────────
@@ -52,7 +54,7 @@ _prompt = ChatPromptTemplate.from_messages([
 ])
 
 # ─── SOVEREIGN TOOL-CALLING LOOP ───────────────────────────────────────────
-_llm_with_tools = llm
+_llm_with_tools = llm.bind_tools(tools) if tools else llm
 _tool_map: Dict[str, Any] = {t.name: t for t in tools} if tools else {}
 _MAX_TOOL_ITERATIONS = 5
 
@@ -87,6 +89,13 @@ async def _sovereign_agent(input_dict: dict, config=None) -> dict:
     Fully compatible with RunnableWithMessageHistory's dict-based input.
     """
     web_context, search_used = await _required_web_context(input_dict)
+    search_failed = False
+    optional_search_safe = requires_deterministic_search(input_dict, True)
+    model = (
+        llm
+        if search_used or not optional_search_safe
+        else _llm_with_tools
+    )
 
     # 1. Render the prompt template into messages
     rendered = _prompt.invoke({
@@ -101,7 +110,7 @@ async def _sovereign_agent(input_dict: dict, config=None) -> dict:
     # 2. Tool-calling loop (bounded)
     response = None
     for iteration in range(_MAX_TOOL_ITERATIONS):
-        response = await _llm_with_tools.ainvoke(messages, config=config)
+        response = await model.ainvoke(messages, config=config)
         messages.append(response)
 
         tool_calls = getattr(response, "tool_calls", None)
@@ -113,11 +122,25 @@ async def _sovereign_agent(input_dict: dict, config=None) -> dict:
             tool_fn = _tool_map.get(tc["name"])
             if tool_fn:
                 try:
-                    result = await tool_fn.ainvoke(tc["args"])
+                    tool_args = (
+                        {
+                            "query": sanitize_search_query(
+                                str(input_dict.get("input") or "")
+                            )
+                        }
+                        if tc["name"] == "tavily_search"
+                        else tc["args"]
+                    )
+                    result = await tool_fn.ainvoke(tool_args)
                     if tc["name"] == "tavily_search":
                         search_used = True
                 except Exception as e:
-                    logger.error(f"[agent_core] Tool '{tc['name']}' error: {e}")
+                    logger.error(
+                        "[agent_core] Tool '%s' failed search_failed=%s",
+                        tc["name"],
+                        tc["name"] == "tavily_search",
+                    )
+                    search_failed = tc["name"] == "tavily_search"
                     if REQUIRE_WEB_SEARCH and tc["name"] == "tavily_search":
                         raise WebSearchRequiredError(
                             "Required web search failed. Please try again later."
@@ -143,7 +166,7 @@ async def _sovereign_agent(input_dict: dict, config=None) -> dict:
     return {
         "output": sanitize_public_reply(output),
         "search_used": search_used,
-        "search_failed": False,
+        "search_failed": search_failed,
     }
 
 
@@ -208,6 +231,12 @@ async def run_agent_inline_stream(
     Buffering prevents a split URL from leaking across token boundaries.
     """
     web_context, search_used = await _required_web_context(input_dict)
+    optional_search_safe = requires_deterministic_search(input_dict, True)
+    model = (
+        llm
+        if search_used or not optional_search_safe
+        else _llm_with_tools
+    )
     if metadata_out is not None:
         metadata_out.update(search_used=search_used, search_failed=False)
 
@@ -224,7 +253,7 @@ async def run_agent_inline_stream(
     for iteration in range(_MAX_TOOL_ITERATIONS):
         response = None
 
-        async for chunk in _llm_with_tools.astream(messages):
+        async for chunk in model.astream(messages):
             response = chunk if response is None else response + chunk
 
         if response is None:
@@ -243,11 +272,24 @@ async def run_agent_inline_stream(
             tool_fn = _tool_map.get(tc["name"])
             if tool_fn:
                 try:
-                    result = await tool_fn.ainvoke(tc["args"])
+                    tool_args = (
+                        {
+                            "query": sanitize_search_query(
+                                str(input_dict.get("input") or "")
+                            )
+                        }
+                        if tc["name"] == "tavily_search"
+                        else tc["args"]
+                    )
+                    result = await tool_fn.ainvoke(tool_args)
                     if tc["name"] == "tavily_search":
                         search_used = True
                 except Exception as e:
-                    logger.error(f"[agent_core] Tool '{tc['name']}' error: {e}")
+                    logger.error(
+                        "[agent_core] Tool '%s' failed search_failed=%s",
+                        tc["name"],
+                        tc["name"] == "tavily_search",
+                    )
                     if metadata_out is not None:
                         metadata_out["search_failed"] = tc["name"] == "tavily_search"
                     if REQUIRE_WEB_SEARCH and tc["name"] == "tavily_search":

@@ -16,6 +16,31 @@ _PRIVATE_QUERY_TERMS_RE = re.compile(
     r"assignment|report|record)\b",
     re.IGNORECASE,
 )
+_PRIVATE_CONTEXT_REFERENCE_RE = re.compile(
+    r"\b(this|that|these|those|attached|uploaded|private|file|document|note|"
+    r"handout|assignment|report|record|score|chapter|page)\b",
+    re.IGNORECASE,
+)
+_MODEL_SOURCE_LABEL_RE = re.compile(
+    r"\b(?:study material|uploaded material|web result)\s+\d+\b",
+    re.IGNORECASE,
+)
+_BLOCKED_PUBLIC_KEYS = {
+    "source",
+    "sources",
+    "sourceurl",
+    "sourceurls",
+    "sourcetitle",
+    "sourcetitles",
+    "contextsources",
+    "url",
+    "urls",
+    "citation",
+    "citations",
+    "reference",
+    "references",
+    "provenance",
+}
 
 
 class WebSearchRequiredError(RuntimeError):
@@ -26,6 +51,7 @@ def sanitize_public_reply(value: Any) -> str:
     """Remove links, raw URLs and trailing source lists before returning text."""
     text = _MARKDOWN_LINK_RE.sub(r"\1", str(value or ""))
     text = _URL_RE.sub("", text)
+    text = _MODEL_SOURCE_LABEL_RE.sub("the provided information", text)
     lines = []
     dropping_sources = False
     for line in text.splitlines():
@@ -44,14 +70,23 @@ def sanitize_public_reply(value: Any) -> str:
 
 
 def sanitize_search_query(value: str) -> str:
-    query = _SENSITIVE_QUERY_RE.sub(" ", value or "")
+    segments = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+", value or "")
+        if part.strip()
+    ]
+    query = next(
+        (part for part in segments if "?" in part),
+        segments[0] if segments else "",
+    )
+    query = _SENSITIVE_QUERY_RE.sub(" ", query)
     query = re.sub(r"[^\w\s?'’-]", " ", query, flags=re.UNICODE)
     query = re.sub(r"\s+", " ", query).strip()
     return " ".join(query.split()[:16])[:180]
 
 
 def requires_deterministic_search(input_dict: dict, required: bool) -> bool:
-    if not required or input_dict.get("has_private_context"):
+    if not required:
         return False
     text = str(input_dict.get("input") or "").strip().lower()
     if not text or re.fullmatch(
@@ -59,7 +94,13 @@ def requires_deterministic_search(input_dict: dict, required: bool) -> bool:
         text,
     ):
         return False
-    return not _PRIVATE_QUERY_TERMS_RE.search(text)
+    if _PRIVATE_QUERY_TERMS_RE.search(text):
+        return False
+    if input_dict.get("has_private_context") and _PRIVATE_CONTEXT_REFERENCE_RE.search(
+        text
+    ):
+        return False
+    return True
 
 
 def sanitize_web_results(resp: Any) -> List[dict]:
@@ -118,3 +159,19 @@ def public_chat_result(result: Dict[str, Any]) -> Dict[str, Any]:
         "search_used": bool(result.get("search_used")),
         "search_failed": bool(result.get("search_failed")),
     }
+
+
+def sanitize_public_data(value: Any) -> Any:
+    """Recursively remove provenance keys and links from public compute data."""
+    if isinstance(value, str):
+        return sanitize_public_reply(value)
+    if isinstance(value, list):
+        return [sanitize_public_data(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: sanitize_public_data(item)
+            for key, item in value.items()
+            if re.sub(r"[-_\s]", "", str(key).lower())
+            not in _BLOCKED_PUBLIC_KEYS
+        }
+    return value

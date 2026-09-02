@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from tavily import TavilyClient
 
 from config import TAVILY_KEY, logger
-from privacy_utils import sanitize_web_results
+from privacy_utils import sanitize_search_query, sanitize_web_results
 
 
 class TavilySearchArgs(BaseModel):
@@ -24,13 +24,20 @@ def _tavily_search(query: str, include_domains: Optional[List[str]] = None, excl
     if not _tavily_client:
         raise ValueError("Tavily is not configured (missing TAVILY_API_KEY).")
 
+    safe_query = sanitize_search_query(query)
+    if len(safe_query.split()) < 2:
+        raise ValueError("Search query could not be sanitized safely.")
+
     resp = _tavily_client.search(
-        query=query,
+        query=safe_query,
         max_results=3,
         include_domains=include_domains,
         exclude_domains=exclude_domains,
     )
-    return sanitize_web_results(resp)
+    results = sanitize_web_results(resp)
+    if not results:
+        raise ValueError("Web search returned no usable results.")
+    return results
 
 
 async def _tavily_search_async(query: str, include_domains: Optional[List[str]] = None, exclude_domains: Optional[List[str]] = None):

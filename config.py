@@ -111,6 +111,10 @@ REQUIRE_DATABASE = _env_bool(
     "REQUIRE_DATABASE",
     "true" if DEPLOY_MODE in ("web", "full") else "false",
 )
+REQUIRE_WEB_SEARCH = _env_bool(
+    "REQUIRE_WEB_SEARCH",
+    "true" if DEPLOY_MODE == "compute" else "false",
+)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
@@ -265,7 +269,13 @@ if LLM_PROVIDER != "gemini" and not GEMINI_API_KEY:
     logger.warning("WARNING: GEMINI_API_KEY not set. Gemini embedding fallback will be unavailable — Pinecone vectorization may fail.")
 
 if not TAVILY_KEY:
-    logger.warning("WARNING: TAVILY_API_KEY not set. Tavily web search will fail if used.")
+    if REQUIRE_WEB_SEARCH:
+        logger.error(
+            "ERROR: TAVILY_API_KEY is required when REQUIRE_WEB_SEARCH=true. "
+            "Refusing to start without the advertised web-search capability."
+        )
+        sys.exit(1)
+    logger.warning("WARNING: TAVILY_API_KEY not set. Tavily web search is disabled.")
 
 if not PINECONE_API_KEY:
     if IS_COMPUTE_MODE:

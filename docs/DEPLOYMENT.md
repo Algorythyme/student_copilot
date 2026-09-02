@@ -28,6 +28,7 @@ ENABLE_NEST_AUTH=true
 ENABLE_SUPABASE_AUTH=false
 ENABLE_STANDALONE_AUTH=false
 AUTH_DISABLED=false
+REQUIRE_WEB_SEARCH=true
 
 NEST_JWT_PUBLIC_KEY_URL=https://<backend-public-url>/api/v1/auth/public-key
 JWT_ISSUER=Pedagic School Management
@@ -35,6 +36,7 @@ JWT_AUDIENCE=school-users
 
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=...
+TAVILY_API_KEY=...
 
 CORS_ALLOW_ORIGINS=https://<backend-public-url>
 ```

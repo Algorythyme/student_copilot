@@ -33,6 +33,7 @@ AUTH_DISABLED=false
 REQUIRE_WEB_SEARCH=true
 
 NEST_JWT_PUBLIC_KEY_URL=https://<backend-public-url>/api/v1/auth/public-key
+# Alternative to the URL above: JWT_PUBLIC_KEY=<same public PEM as backend>
 JWT_ISSUER=Pedagic School Management
 JWT_AUDIENCE=school-users
 
@@ -45,14 +46,32 @@ CORS_ALLOW_ORIGINS=https://<backend-public-url>
 
 Do **not** set `JWT_PRIVATE_KEY`, `JWT_SECRET` (prod), `DATABASE_URL`, or manual `PORT=8003`.
 
+`REQUIRE_WEB_SEARCH=true` makes `TAVILY_API_KEY` conditionally required and
+required-search failures return 503. With `false`, the service starts without
+Tavily and web search is disabled. Values are read at startup: restart or
+redeploy after any environment change.
+
 ---
 
 ## Optional env
 
 ```env
+GEMINI_MODEL_NAME=gemini-2.5-flash-lite
+GEMINI_EMBEDDING_MODEL=gemini-embedding-001
+# OPENAI_MODEL_NAME=gpt-4o
+# DEEPSEEK_MODEL_NAME=deepseek-v4-flash
+# DEEPSEEK_BASE_URL=https://api.deepseek.com
+LLM_TEMPERATURE=0.7
 LLM_TIMEOUT_SECONDS=90
+EMBED_BATCH_SIZE=15
+EMBED_BATCH_PAUSE_SEC=2
+EMBED_MAX_RETRIES=4
 REDIS_URL=${{Redis.REDIS_URL}}
 ```
+
+Set the API key matching `LLM_PROVIDER`: `GEMINI_API_KEY`, `OPENAI_API_KEY`,
+or `DEEPSEEK_API_KEY`. Gemini remains the embedding fallback; without
+`GEMINI_API_KEY`, non-Gemini provider deployments may lose embedding support.
 
 ---
 

@@ -37,7 +37,7 @@ class PracticeGenerateSchemaTests(unittest.TestCase):
 
     def test_defaults_are_mcq_only(self):
         payload = ComputePracticeGenerateRequest(**self._valid_kwargs(exclude_stems=None))
-        self.assertEqual(payload.mcq_count, 10)
+        self.assertEqual(payload.mcq_count, 20)
         self.assertEqual(payload.theory_count, 0)
         self.assertEqual(payload.exclude_stems, [])
 
@@ -121,7 +121,7 @@ class PracticePromptTests(unittest.TestCase):
         self.assertIn("0.1 recall", prompt)
         self.assertIn("1.0 exam-hard", prompt)
         self.assertIn("WAEC/NECO", prompt)
-        self.assertIn("Generate 10 MCQs", prompt)
+        self.assertIn("Generate 20 MCQs", prompt)
         self.assertIn("First Term", prompt)
         self.assertIn("SSS1", prompt)
         self.assertIn("Quadratic Equations", prompt)

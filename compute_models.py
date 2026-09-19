@@ -78,7 +78,7 @@ class ComputePracticeGenerateRequest(BaseModel):
     term: Optional[str] = None
     country: Optional[str] = None
     difficulty: float = Field(..., ge=0.1, le=1.0)
-    mcq_count: int = 10
+    mcq_count: int = 20
     theory_count: int = 0
     context_chunks: List[ContextChunk] = Field(..., min_length=1)
     user_profile: Optional[UserProfilePayload] = None

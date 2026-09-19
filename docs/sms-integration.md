@@ -121,7 +121,7 @@ Generate an exam from SMS-retrieved context.
 
 ### POST `/api/v1/compute/practice/generate`
 
-MCQ-only practice batch from SMS-retrieved **curriculum** context. Token-cheap: no evaluate, no tools, no theory.
+MCQ-only practice batch from SMS-retrieved **curriculum** context. One LLM call returns 20 MCQs. Token-cheap: no evaluate, no tools, no theory.
 
 `context_chunks` is required and must be non-empty. Fail closed if SMS has no indexed curriculum for the topic.
 
@@ -138,7 +138,7 @@ MCQ-only practice batch from SMS-retrieved **curriculum** context. Token-cheap: 
   "term": "First Term",
   "country": "Nigeria",
   "difficulty": 0.3,
-  "mcq_count": 10,
+  "mcq_count": 20,
   "theory_count": 0,
   "context_chunks": [
     { "source": "Curriculum 1", "content": "..." }
@@ -157,7 +157,7 @@ MCQ-only practice batch from SMS-retrieved **curriculum** context. Token-cheap: 
 | Field | Notes |
 |-------|--------|
 | `difficulty` | Required, `0.1`–`1.0` (Bloom: recall → exam-hard) |
-| `mcq_count` | Default `10`; response is exactly this many MCQs |
+| `mcq_count` | Default `20`; response is exactly this many MCQs (one LLM call). SMS sits 10 and keeps the rest as unused leftovers |
 | `theory_count` | Default `0`; ignored — output is MCQ-only |
 | `country` | One-line exam-body hint (Nigeria → WAEC/NECO). Same map idea as curriculum-builder `COUNTRY_EXAM_BODY_MAP` |
 | `week` | Optional integer interpolated into the prompt |

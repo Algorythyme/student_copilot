@@ -14,6 +14,8 @@ from compute_models import (
     ComputeChatResponse,
     ComputeEvaluateSessionRequest,
     ComputeEvaluateSessionResponse,
+    ComputePracticeGenerateRequest,
+    ComputePracticeGenerateResponse,
     ComputeRevisionEvaluateRequest,
     ComputeRevisionEvaluateResponse,
     ComputeRevisionGenerateRequest,
@@ -183,6 +185,30 @@ async def compute_revision_generate(
         "Exam generation failed.",
     )
     return ComputeRevisionGenerateResponse(**result)
+
+
+@router.post("/practice/generate", response_model=ComputePracticeGenerateResponse)
+@limiter.limit(RATE_LIMIT_GENERATE)
+async def compute_practice_generate(
+    request: Request,
+    payload: ComputePracticeGenerateRequest,
+    identity: VerifiedIdentity = Depends(get_current_identity),
+) -> ComputePracticeGenerateResponse:
+    logger.info(
+        "[compute] practice/generate started user=%s subject=%s difficulty=%s week=%s term=%s",
+        identity.user_id,
+        payload.subject,
+        payload.difficulty,
+        payload.week,
+        payload.term,
+    )
+    result = await _run_compute(
+        "practice/generate",
+        identity,
+        compute_service.compute_practice_generate(payload),
+        "Practice generation failed.",
+    )
+    return ComputePracticeGenerateResponse(**result)
 
 
 @router.post("/revision/evaluate", response_model=ComputeRevisionEvaluateResponse)

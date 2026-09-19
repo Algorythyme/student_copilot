@@ -119,6 +119,69 @@ Generate an exam from SMS-retrieved context.
 }
 ```
 
+### POST `/api/v1/compute/practice/generate`
+
+MCQ-only practice batch from SMS-retrieved **curriculum** context. Token-cheap: no evaluate, no tools, no theory.
+
+`context_chunks` is required and must be non-empty. Fail closed if SMS has no indexed curriculum for the topic.
+
+`user_profile` may be attached for parity (use `learning_method` only). Copilot does **not** interpolate `full_name` into the prompt.
+
+**Request**
+
+```json
+{
+  "subject": "Mathematics",
+  "class_id": "SSS1",
+  "topics": "Quadratic Equations",
+  "week": 5,
+  "term": "First Term",
+  "country": "Nigeria",
+  "difficulty": 0.3,
+  "mcq_count": 10,
+  "theory_count": 0,
+  "context_chunks": [
+    { "source": "Curriculum 1", "content": "..." }
+  ],
+  "user_profile": {
+    "full_name": "Ada Lovelace",
+    "class_id": "SSS1",
+    "subjects": "Mathematics",
+    "learning_method": "visual analogies",
+    "country": "Nigeria"
+  },
+  "exclude_stems": ["optional previously seen stems"]
+}
+```
+
+| Field | Notes |
+|-------|--------|
+| `difficulty` | Required, `0.1`–`1.0` (Bloom: recall → exam-hard) |
+| `mcq_count` | Default `10`; response is exactly this many MCQs |
+| `theory_count` | Default `0`; ignored — output is MCQ-only |
+| `country` | One-line exam-body hint (Nigeria → WAEC/NECO). Same map idea as curriculum-builder `COUNTRY_EXAM_BODY_MAP` |
+| `week` | Optional integer interpolated into the prompt |
+| `term` | Optional string (`"First Term"`) or integer; interpolated into the prompt |
+| `exclude_stems` | Optional previously seen stems; honored if present (capped) |
+
+**Response**
+
+```json
+{
+  "questions": [
+    {
+      "id": "q1",
+      "type": "mcq",
+      "text": "...",
+      "options": ["A", "B", "C", "D"],
+      "correct_answer": "B"
+    }
+  ]
+}
+```
+
+Scoring stays in SMS. Do not call `/revision/evaluate` for practice marks.
+
 ### POST `/api/v1/compute/revision/evaluate`
 
 Grade student answers against ground-truth context.

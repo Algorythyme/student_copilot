@@ -14,12 +14,14 @@ from ai_summarizer import evaluate_session_learning_method
 from compute_models import (
     ComputeChatRequest,
     ComputeEvaluateSessionRequest,
+    ComputePracticeGenerateRequest,
     ComputeRevisionEvaluateRequest,
     ComputeRevisionGenerateRequest,
     ComputeSummarizeRequest,
     ContextChunk,
     FileSummaryItem,
     UserProfilePayload,
+    practice_system_prompt,
 )
 from config import logger
 from llm_setup import llm
@@ -150,6 +152,29 @@ async def compute_revision_generate(payload: ComputeRevisionGenerateRequest) -> 
     questions = exam.get("questions") if isinstance(exam, dict) else exam
     if not isinstance(questions, list):
         raise ValueError("LLM did not return a valid questions list.")
+    return {"questions": sanitize_public_data(questions)}
+
+
+async def compute_practice_generate(payload: ComputePracticeGenerateRequest) -> Dict[str, Any]:
+    if not any((chunk.content or "").strip() for chunk in payload.context_chunks):
+        raise ValueError(
+            "No context_chunks provided. SMS must supply retrieved curriculum material."
+        )
+    context = _build_context_text(payload.context_chunks)
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", practice_system_prompt(payload)),
+        ("user", "Generate the exam now."),
+    ])
+
+    chain = prompt | llm | JsonOutputParser()
+    exam = await chain.ainvoke({"context": context})
+    questions = exam.get("questions") if isinstance(exam, dict) else exam
+    if not isinstance(questions, list):
+        raise ValueError("LLM did not return a valid questions list.")
+    questions = questions[: payload.mcq_count]
+    if len(questions) < payload.mcq_count:
+        raise ValueError("LLM did not return enough MCQs.")
     return {"questions": sanitize_public_data(questions)}
 
 

@@ -61,9 +61,10 @@ class PracticeGenerateSchemaTests(unittest.TestCase):
 
     def test_difficulty_bounds(self):
         with self.assertRaises(ValidationError):
-            ComputePracticeGenerateRequest(**self._valid_kwargs(difficulty=0.09))
+            ComputePracticeGenerateRequest(**self._valid_kwargs(difficulty=-0.01))
         with self.assertRaises(ValidationError):
             ComputePracticeGenerateRequest(**self._valid_kwargs(difficulty=1.01))
+        ComputePracticeGenerateRequest(**self._valid_kwargs(difficulty=0.0))
         ComputePracticeGenerateRequest(**self._valid_kwargs(difficulty=0.1))
         ComputePracticeGenerateRequest(**self._valid_kwargs(difficulty=1.0))
 
@@ -116,10 +117,9 @@ class PracticePromptTests(unittest.TestCase):
         self.assertIn("visual analogies", prompt)
         self.assertNotIn("Ada Lovelace", prompt)
         self.assertNotIn("full_name", prompt)
-        self.assertIn("type' ('mcq')", prompt)
-        self.assertIn("MCQ-only", prompt)
-        self.assertIn("0.1 recall", prompt)
-        self.assertIn("1.0 exam-hard", prompt)
+        self.assertIn("'type': 'mcq'", prompt)
+        self.assertIn("Tier 2: Conceptual Understanding", prompt)
+        self.assertIn("TARGET DIFFICULTY LEVEL: 30%", prompt)
         self.assertIn("WAEC/NECO", prompt)
         self.assertIn("Generate 20 MCQs", prompt)
         self.assertIn("First Term", prompt)
@@ -129,7 +129,33 @@ class PracticePromptTests(unittest.TestCase):
         self.assertIn("Solve {{x}}^2 = 4", prompt)
         self.assertNotIn("{x}", prompt.replace("{{x}}", ""))
         self.assertNotIn("Theory", prompt)
+        self.assertIn("Scheme week", prompt)
         self.assertEqual(prompt.count("{context}"), 1)
+
+    def test_rubrics_across_difficulty_spectrum(self):
+        # Tier 1: 0.0 - 0.2
+        p0 = ComputePracticeGenerateRequest(
+            subject="Physics",
+            difficulty=0.0,
+            context_chunks=[ContextChunk(source="C", content="F=ma")],
+        )
+        self.assertIn("Tier 1: Foundational Recall", practice_system_prompt(p0))
+
+        # Tier 3: 0.5 - 0.6
+        p5 = ComputePracticeGenerateRequest(
+            subject="Physics",
+            difficulty=0.6,
+            context_chunks=[ContextChunk(source="C", content="F=ma")],
+        )
+        self.assertIn("Tier 3: Applied Problem Solving", practice_system_prompt(p5))
+
+        # Tier 5: 0.9 - 1.0
+        p10 = ComputePracticeGenerateRequest(
+            subject="Physics",
+            difficulty=1.0,
+            context_chunks=[ContextChunk(source="C", content="F=ma")],
+        )
+        self.assertIn("Tier 5: Exam Distinction", practice_system_prompt(p10))
 
 
 if __name__ == "__main__":
